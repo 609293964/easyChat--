@@ -20,15 +20,22 @@ class MomoReplyGUI(QWidget):
         super().__init__()
 
         self.config_path = "wechat_config_momo.json"
+        
+        # 优化：使用系统通用路径代替个人写死的硬编码路径
+        default_material_folder = os.path.join(os.path.expanduser("~"), "Desktop", "素材")
+        
         if os.path.exists(self.config_path):
             with open(self.config_path, "r", encoding="utf-8") as r:
                 self.config = json.load(r)
+                # 确保旧配置文件也有 settings 字典
+                if "settings" not in self.config:
+                    self.config["settings"] = {}
         else:
             self.config = {
                 "settings": {
                     "wechat_path": "",
                     "language": "zh-CN",
-                    "material_folder": "C:\\Users\\lishi\\Desktop\\素材",
+                    "material_folder": default_material_folder,
                     "trigger_sender": "momo",
                     "trigger_keywords": "!,！",
                 }
@@ -36,8 +43,8 @@ class MomoReplyGUI(QWidget):
             self.save_config()
 
         self.wechat = WeChat(
-            path=self.config["settings"]["wechat_path"],
-            locale=self.config["settings"]["language"],
+            path=self.config.get("settings", {}).get("wechat_path", ""),
+            locale=self.config.get("settings", {}).get("language", "zh-CN"),
         )
         
         self.monitoring = False
@@ -48,7 +55,7 @@ class MomoReplyGUI(QWidget):
         self.add_log_signal.connect(self._do_add_log)
         self.initUI()
         
-        if self.config["settings"].get("enable_auto_timer", False):
+        if self.config.get("settings", {}).get("enable_auto_timer", False):
             self.enable_auto_timer.setChecked(True)
             self.start_auto_timer_check()
         
@@ -57,6 +64,18 @@ class MomoReplyGUI(QWidget):
     def save_config(self):
         with open(self.config_path, "w", encoding="utf8") as w:
             json.dump(self.config, w, indent=4, ensure_ascii=False)
+
+    # 优化：提取公共的获取合法图片列表的方法 (DRY原则)
+    def get_valid_images(self, folder):
+        if not os.path.exists(folder):
+            return []
+        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+        images = []
+        for file in os.listdir(folder):
+            ext = os.path.splitext(file)[1].lower()
+            if ext in image_extensions:
+                images.append(os.path.join(folder, file))
+        return images
 
     def closeEvent(self, event):
         if self.monitoring:
@@ -99,11 +118,13 @@ class MomoReplyGUI(QWidget):
         lang_zh_TW_btn = QRadioButton("繁体中文")
         lang_en_btn = QRadioButton("English")
 
-        if self.config["settings"]["language"] == "zh-CN":
+        # 优化：安全获取字典值
+        current_lang = self.config.get("settings", {}).get("language", "zh-CN")
+        if current_lang == "zh-CN":
             lang_zh_CN_btn.setChecked(True)
-        elif self.config["settings"]["language"] == "zh-TW":
+        elif current_lang == "zh-TW":
             lang_zh_TW_btn.setChecked(True)
-        elif self.config["settings"]["language"] == "en-US":
+        elif current_lang == "en-US":
             lang_en_btn.setChecked(True)
 
         lang_zh_CN_btn.clicked.connect(switch_language)
@@ -121,6 +142,8 @@ class MomoReplyGUI(QWidget):
         return vbox
 
     def init_settings(self):
+        settings_config = self.config.get("settings", {})
+        
         def choose_wechat_path():
             path, _ = QFileDialog.getOpenFileName(self, "选择微信.exe", "", "可执行文件(*.exe)")
             if path:
@@ -139,25 +162,15 @@ class MomoReplyGUI(QWidget):
         def update_image_count():
             folder = material_folder_input.text().strip()
             if os.path.exists(folder):
-                images = get_image_files(folder)
+                images = self.get_valid_images(folder)
                 image_count_label.setText(f"当前素材文件夹中有 {len(images)} 张图片")
             else:
                 image_count_label.setText("素材文件夹不存在")
 
-        def get_image_files(folder):
-            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-            images = []
-            if os.path.exists(folder):
-                for file in os.listdir(folder):
-                    ext = os.path.splitext(file)[1].lower()
-                    if ext in image_extensions:
-                        images.append(os.path.join(folder, file))
-            return images
-
         form_layout = QFormLayout()
 
         wechat_path_input = QLineEdit()
-        wechat_path_input.setText(self.config["settings"].get("wechat_path", ""))
+        wechat_path_input.setText(settings_config.get("wechat_path", ""))
         wechat_path_btn = QPushButton("浏览...")
         wechat_path_btn.clicked.connect(choose_wechat_path)
         hbox_wechat = QHBoxLayout()
@@ -166,17 +179,31 @@ class MomoReplyGUI(QWidget):
         form_layout.addRow("微信exe路径:", hbox_wechat)
 
         trigger_sender_input = QLineEdit()
-        trigger_sender_input.setText(self.config["settings"].get("trigger_sender", "momo"))
-        trigger_sender_input.textChanged.connect(lambda: self.config["settings"].update({"trigger_sender": trigger_sender_input.text()}) or self.save_config())
+        trigger_sender_input.setText(settings_config.get("trigger_sender", "momo"))
+        # 优化：改用 editingFinished，避免输入时频繁读写文件
+        trigger_sender_input.editingFinished.connect(
+            lambda: self.config["settings"].update({"trigger_sender": trigger_sender_input.text()}) or self.save_config()
+        )
         form_layout.addRow("触发者昵称:", trigger_sender_input)
 
         trigger_keywords_input = QLineEdit()
-        trigger_keywords_input.setText(self.config["settings"].get("trigger_keywords", "!,！"))
-        trigger_keywords_input.textChanged.connect(lambda: self.config["settings"].update({"trigger_keywords": trigger_keywords_input.text()}) or self.save_config())
+        trigger_keywords_input.setText(settings_config.get("trigger_keywords", "!,！"))
+        # 优化：改用 editingFinished
+        trigger_keywords_input.editingFinished.connect(
+            lambda: self.config["settings"].update({"trigger_keywords": trigger_keywords_input.text()}) or self.save_config()
+        )
         form_layout.addRow("触发关键词(用逗号分隔):", trigger_keywords_input)
 
+        default_folder = os.path.join(os.path.expanduser("~"), "Desktop", "素材")
         material_folder_input = QLineEdit()
-        material_folder_input.setText(self.config["settings"].get("material_folder", "C:\\Users\\lishi\\Desktop\\素材"))
+        material_folder_input.setText(settings_config.get("material_folder", default_folder))
+        # 优化：改用 editingFinished，同时更新图片数量
+        def on_material_folder_edited():
+            self.config["settings"]["material_folder"] = material_folder_input.text()
+            self.save_config()
+            update_image_count()
+        material_folder_input.editingFinished.connect(on_material_folder_edited)
+        
         material_folder_btn = QPushButton("浏览...")
         material_folder_btn.clicked.connect(choose_material_folder)
         hbox_folder = QHBoxLayout()
@@ -186,13 +213,12 @@ class MomoReplyGUI(QWidget):
 
         image_count_label = QLabel()
         update_image_count()
-        material_folder_input.textChanged.connect(update_image_count)
         form_layout.addRow("", image_count_label)
         
         delay_label = QLabel("检测到触发后基础延迟（分钟）:")
         self.delay_spin = QDoubleSpinBox()
         self.delay_spin.setRange(0, 60)
-        self.delay_spin.setValue(self.config["settings"].get("send_delay", 0))
+        self.delay_spin.setValue(settings_config.get("send_delay", 0))
         self.delay_spin.setSingleStep(0.5)
         self.delay_spin.setDecimals(1)
         def update_delay():
@@ -204,7 +230,7 @@ class MomoReplyGUI(QWidget):
         random_label = QLabel("随机浮动范围（分钟）:")
         self.random_delay_spin = QDoubleSpinBox()
         self.random_delay_spin.setRange(0, 30)
-        self.random_delay_spin.setValue(self.config["settings"].get("random_delay", 0))
+        self.random_delay_spin.setValue(settings_config.get("random_delay", 0))
         self.random_delay_spin.setSingleStep(0.5)
         self.random_delay_spin.setDecimals(1)
         def update_random_delay():
@@ -219,7 +245,7 @@ class MomoReplyGUI(QWidget):
         form_layout.addRow(QLabel("------------------------"))
         self.trigger_mode_exact = QRadioButton("只匹配单独感叹号（例如 \"!\" 或 \"！\"）")
         self.trigger_mode_contains = QRadioButton("只要包含感叹号就触发")
-        if self.config["settings"].get("trigger_mode", "exact") == "exact":
+        if settings_config.get("trigger_mode", "exact") == "exact":
             self.trigger_mode_exact.setChecked(True)
         else:
             self.trigger_mode_contains.setChecked(True)
@@ -240,10 +266,10 @@ class MomoReplyGUI(QWidget):
         start_hbox = QHBoxLayout()
         self.start_hour = QSpinBox()
         self.start_hour.setRange(0, 23)
-        self.start_hour.setValue(self.config["settings"].get("auto_start_hour", 10))
+        self.start_hour.setValue(settings_config.get("auto_start_hour", 10))
         self.start_minute = QSpinBox()
         self.start_minute.setRange(0, 59)
-        self.start_minute.setValue(self.config["settings"].get("auto_start_minute", 0))
+        self.start_minute.setValue(settings_config.get("auto_start_minute", 0))
         def update_start_time():
             self.config["settings"]["auto_start_hour"] = self.start_hour.value()
             self.config["settings"]["auto_start_minute"] = self.start_minute.value()
@@ -260,10 +286,10 @@ class MomoReplyGUI(QWidget):
         end_hbox = QHBoxLayout()
         self.end_hour = QSpinBox()
         self.end_hour.setRange(0, 23)
-        self.end_hour.setValue(self.config["settings"].get("auto_end_hour", 12))
+        self.end_hour.setValue(settings_config.get("auto_end_hour", 12))
         self.end_minute = QSpinBox()
         self.end_minute.setRange(0, 59)
-        self.end_minute.setValue(self.config["settings"].get("auto_end_minute", 0))
+        self.end_minute.setValue(settings_config.get("auto_end_minute", 0))
         def update_end_time():
             self.config["settings"]["auto_end_hour"] = self.end_hour.value()
             self.config["settings"]["auto_end_minute"] = self.end_minute.value()
@@ -278,7 +304,7 @@ class MomoReplyGUI(QWidget):
         form_layout.addRow(end_hbox)
         
         self.enable_auto_timer = QCheckBox("启用每日定时自动启停")
-        self.enable_auto_timer.setChecked(self.config["settings"].get("enable_auto_timer", False))
+        self.enable_auto_timer.setChecked(settings_config.get("enable_auto_timer", False))
         def toggle_auto_timer(state):
             self.config["settings"]["enable_auto_timer"] = (state == Qt.Checked)
             self.save_config()
@@ -307,20 +333,18 @@ class MomoReplyGUI(QWidget):
         current_time = time.strftime("%H:%M:%S")
         self.log_view.addItem(f"[{current_time}] {message}")
         self.log_view.scrollToBottom()
-        if self.log_view.count() > 100:
+        # 优化：保留更多日志记录（由100提升至200）
+        if self.log_view.count() > 200:
             self.log_view.takeItem(0)
 
     def on_last_message_change(self, last_text, current_time):
-        trigger_sender = self.config["settings"].get("trigger_sender", "momo")
-        trigger_keywords = self.config["settings"].get("trigger_keywords", "!,！")
-        material_folder = self.config["settings"].get("material_folder", "C:\\Users\\lishi\\Desktop\\素材")
-        trigger_mode = self.config["settings"].get("trigger_mode", "exact")
+        settings_config = self.config.get("settings", {})
+        trigger_sender = settings_config.get("trigger_sender", "momo")
+        trigger_keywords = settings_config.get("trigger_keywords", "!,！")
+        material_folder = settings_config.get("material_folder", "")
+        trigger_mode = settings_config.get("trigger_mode", "exact")
         
-        keywords = []
-        for k in trigger_keywords.split(','):
-            kw = k.strip()
-            if kw:
-                keywords.append(kw)
+        keywords = [k.strip() for k in trigger_keywords.split(',') if k.strip()]
         
         triggered = False
         clean_text = str(last_text).strip()
@@ -340,8 +364,8 @@ class MomoReplyGUI(QWidget):
             self.add_log(f"🚨🚨🚨 【高危警报】检测到未回复的感叹号！")
             self.add_log(f"底层抓取到的最后一条内容: '{last_text}'")
             
-            base_delay = self.config["settings"].get("send_delay", 0)
-            random_range = self.config["settings"].get("random_delay", 0)
+            base_delay = settings_config.get("send_delay", 0)
+            random_range = settings_config.get("random_delay", 0)
             
             if base_delay > 0 or random_range > 0:
                 half_range = random_range / 2
@@ -353,10 +377,23 @@ class MomoReplyGUI(QWidget):
                     actual_delay = base_delay
                     self.add_log(f"⏳ 将在 {actual_delay:.1f} 分钟后发送图片...")
                 
-                delay_seconds = actual_delay * 60
+                delay_seconds = int(actual_delay * 60)
+                
+                # 优化：修复延迟发送时中途关闭监控仍然会发送的 bug
                 def delayed_send():
-                    time.sleep(delay_seconds)
-                    self._do_send_image(trigger_sender, material_folder, current_time)
+                    wait_time = delay_seconds
+                    while wait_time > 0:
+                        if not self.monitoring:
+                            self.add_log("⏹️ 监控已停止，取消本次延迟发送计划")
+                            self.last_triggered = False
+                            return
+                        time.sleep(1)
+                        wait_time -= 1
+                        
+                    # 循环结束，二次确认是否仍在监控
+                    if self.monitoring:
+                        self._do_send_image(trigger_sender, material_folder, current_time)
+                        
                 thread = threading.Thread(target=delayed_send, daemon=True)
                 thread.start()
             else:
@@ -370,16 +407,12 @@ class MomoReplyGUI(QWidget):
         current_time = time.strftime("%H:%M:%S")
         self.add_log(f"📡 [{current_time}] 开始执行发送...")
         
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-        images = []
-        if os.path.exists(material_folder):
-            for file in os.listdir(material_folder):
-                ext = os.path.splitext(file)[1].lower()
-                if ext in image_extensions:
-                    images.append(os.path.join(material_folder, file))
+        # 优化：调用封装好的公共方法
+        images = self.get_valid_images(material_folder)
         
         if len(images) == 0:
             self.add_log("❌ 素材文件夹中没有找到图片，无法发送")
+            self.last_triggered = False
             return
         
         selected_image = random.choice(images)
@@ -400,17 +433,13 @@ class MomoReplyGUI(QWidget):
             QMessageBox.information(self, "提示", "监控已经在运行中！")
             return
         
-        material_folder = self.config["settings"].get("material_folder", "")
+        material_folder = self.config.get("settings", {}).get("material_folder", "")
         if not os.path.exists(material_folder):
             QMessageBox.warning(self, "错误", "素材文件夹不存在，请先设置正确的路径！")
             return
         
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-        images = []
-        for file in os.listdir(material_folder):
-            ext = os.path.splitext(file)[1].lower()
-            if ext in image_extensions:
-                images.append(os.path.join(material_folder, file))
+        # 优化：调用封装好的公共方法
+        images = self.get_valid_images(material_folder)
         
         if len(images) == 0:
             QMessageBox.warning(self, "提示", "素材文件夹中没有图片文件，发送触发后将无法发送图片！")
@@ -428,7 +457,7 @@ class MomoReplyGUI(QWidget):
         self.start_btn.setStyleSheet("color:gray")
         self.stop_btn.setStyleSheet("color:red")
         
-        delay = self.config["settings"].get("send_delay", 0)
+        delay = self.config.get("settings", {}).get("send_delay", 0)
         delay_info = f"\n• 检测到触发后延迟 {delay} 分钟发送" if delay > 0 else ""
         
         QMessageBox.information(self, "监控已启动", 
@@ -468,10 +497,11 @@ class MomoReplyGUI(QWidget):
     
     def auto_check_time(self):
         now = datetime.datetime.now()
-        start_h = self.config["settings"].get("auto_start_hour", 10)
-        start_m = self.config["settings"].get("auto_start_minute", 0)
-        end_h = self.config["settings"].get("auto_end_hour", 12)
-        end_m = self.config["settings"].get("auto_end_minute", 0)
+        settings_config = self.config.get("settings", {})
+        start_h = settings_config.get("auto_start_hour", 10)
+        start_m = settings_config.get("auto_start_minute", 0)
+        end_h = settings_config.get("auto_end_hour", 12)
+        end_m = settings_config.get("auto_end_minute", 0)
         
         current_total = now.hour * 60 + now.minute
         start_total = start_h * 60 + start_m
