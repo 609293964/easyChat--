@@ -59,8 +59,20 @@ class WeChat:
         # 自动回复的联系人列表
         self.auto_reply_contacts = []
         
+        # 自动回复的联系人列表
+        self.auto_reply_contacts = []
+        
         # 自动回复的内容
         self.auto_reply_msg = "[自动回复]您好，我现在正在忙，稍后会主动联系您，感谢理解。"
+        
+        # 消息监控回调函数
+        self.message_callback = None
+        
+        # 上次读取的消息ID，用于去重
+        self.last_message_id = 0
+        
+        # 监控运行标志
+        self.monitoring = False
 
         assert locale in WeChatLocale.getSupportedLocales()
         self.lc = WeChatLocale(locale)
@@ -83,6 +95,25 @@ class WeChat:
             return False
         except:
             return False
+    
+    # 确保微信窗口是打开且非最小化的
+    def ensure_wechat_visible(self):
+        """确保微信窗口存在，如果最小化就还原它"""
+        try:
+            wechat_window = auto.WindowControl(Depth=1, Name=self.lc.weixin, searchDepth=1)
+            if wechat_window.Exists(0, 0):
+                hwnd = wechat_window.NativeWindowHandle
+                user32 = windll.user32
+                is_minimized = user32.IsIconic(hwnd)
+                if is_minimized:
+                    # 如果最小化了，还原窗口
+                    user32.OpenIconicWindow(hwnd)
+                    time.sleep(1)
+                wechat_window.SetFocus()
+                return True
+        except:
+            pass
+        return False
 
     # 打开微信客户端
     def open_wechat(self):
@@ -93,8 +124,22 @@ class WeChat:
             wechat_window.SetFocus()
             return
 
-        # 如果窗口不可见，通过按下微信打开窗口的全局快捷键来打开微信窗口
+        # 窗口存在但可能最小化了，先尝试还原
+        if self.ensure_wechat_visible():
+            time.sleep(1)
+            if self.is_wechat_visible():
+                return
+
+        # 如果窗口不可见，先尝试通过全局快捷键打开（微信已经运行但最小化）
         auto.SendKeys("{Ctrl}{Alt}w")
+        time.sleep(2)
+        
+        # 如果快捷键打不开，检查一下是否微信进程没启动，直接启动它
+        if not self.is_wechat_visible() and self.path and os.path.exists(self.path):
+            # 从配置的路径启动微信
+            subprocess.Popen(self.path)
+            # 等待微信启动
+            time.sleep(5)
     
     # 搜寻微信客户端控件
     def get_wechat(self):
@@ -151,9 +196,8 @@ class WeChat:
     
     # 鼠标移动到发送按钮处点击发送消息
     def press_enter(self):
-        # 获取发送按钮
-        send_button = auto.ButtonControl(Depth=15, Name=self.lc.send)
-        click(send_button)
+        # 改用回车键发送，比点击发送按钮更可靠（适配不同微信版本）
+        auto.SendKeys("{enter}")
 
     def paste_text(self, text: str) -> None:
         """
@@ -216,11 +260,57 @@ class WeChat:
         """
         if search_user:
             self.get_contact(name)
+        else:
+            # 即使不搜索用户，也要确保微信窗口在前台，并点击输入框
+            self.open_wechat()
+            wechat_window = self.get_wechat()
+            wechat_window.SetFocus()
+            time.sleep(0.2)
+            
+            # 尝试多种方式点击输入框，根据控件树，输入框是EditControl名字为"输入"
+            clicked = False
+            # 方式1：直接找 EditControl 名字为"输入"（新版微信输入框名字就是"输入"
+            try:
+                edit_input = auto.EditControl(Name="输入", searchDepth=20)
+                if edit_input.Exists(0.5, 0):
+                    move(edit_input)
+                    click(edit_input)
+                    clicked = True
+                    time.sleep(0.2)
+                    print(f"找到输入框EditControl，点击成功")
+            except Exception as e:
+                print(f"方式1找输入框失败: {e}")
+            
+            # 方式2：通过工具条查找（兼容旧版本）
+            if not clicked:
+                try:
+                    tool_bar = auto.ToolBarControl(searchDepth=20)
+                    if tool_bar.Exists(0.5, 0):
+                        move(tool_bar)
+                        click(tool_bar)
+                        clicked = True
+                        time.sleep(0.2)
+                        print(f"方式2找到工具条，点击成功")
+                except Exception as e:
+                    print(f"方式2找输入框失败: {e}")
+            
+            # 如果还没找到，方式3：直接点击屏幕下方中央位置（输入框通常在那里）
+            if not clicked:
+                import pyautogui
+                screen_width, screen_height = pyautogui.size()
+                # 点击屏幕下方中央，大概就是输入框位置
+                pyautogui.click(screen_width // 2, int(screen_height * 0.85))
+                clicked = True
+                time.sleep(0.2)
+                print(f"方式3点击屏幕下方中央，点击成功")
         
         # 将文件复制到剪切板
         setClipboardFiles([path])
+        time.sleep(0.3)
         
         auto.SendKeys("{Ctrl}v")
+        time.sleep(0.5)
+        
         self.press_enter()
     
     # 获取所有通讯录中所有联系人
@@ -563,6 +653,303 @@ class WeChat:
                 search_user = False  # 后续不需要再次搜索用户
 
         return groups
+    
+    # ==================== 消息监控功能 ====================
+    def set_message_callback(self, callback):
+        """
+        设置消息回调函数，当收到新消息时会调用这个函数
+        回调函数参数：(联系人名称, 消息内容, 消息时间, 消息类型)
+        消息类型：text(文本), file(文件), image(图片), voice(语音), other(其他)
+        """
+        self.message_callback = callback
+    
+    def get_chat_list(self):
+        """获取当前聊天列表中的所有联系人"""
+        try:
+            self.open_wechat()
+            wechat_window = self.get_wechat()
+            
+            # 找到会话列表控件
+            session_list = wechat_window.ListControl(Name=self.lc.session_list, searchDepth=32)
+            if not session_list.Exists(0, 0):
+                return []
+            
+            # 获取所有会话项
+            sessions = session_list.GetChildren()
+            chat_list = []
+            for session in sessions:
+                if session.ControlTypeName == "ListItemControl":
+                    name = session.Name
+                    if name and name not in ["", "会话列表", "微信"]:
+                        chat_list.append(name)
+            
+            return chat_list
+        except Exception as e:
+            print(f"获取聊天列表失败: {e}")
+            return []
+    
+    def get_current_chat_messages(self, max_count=20):
+        """获取当前打开的聊天窗口的消息记录"""
+        try:
+            wechat_window = self.get_wechat()
+            
+            # 尝试多种方式查找消息列表控件，适配不同微信版本
+            msg_list = None
+            # 方式1：通过本地化名称查找
+            try:
+                msg_list = wechat_window.ListControl(Name=self.lc.message_list, searchDepth=32)
+                if msg_list.Exists(0, 0):
+                    print(f"通过名称找到消息列表: {msg_list.Name}")
+            except Exception as e:
+                print(f"方式1失败: {e}")
+                pass
+            # 方式2：通过控件类型查找，递归遍历子控件
+            def find_msg_list(control, depth=0):
+                nonlocal msg_list
+                if msg_list:
+                    return
+                try:
+                    if control.ControlTypeName == "ListControl":
+                        name = control.Name if hasattr(control, 'Name') else ""
+                        if name not in ["会话列表", "联系人列表", "搜索结果", "表情面板"]:
+                            children = control.GetChildren()
+                            if len(children) > 0 and any(item.ControlTypeName == "ListItemControl" for item in children):
+                                msg_list = control
+                                print(f"找到消息列表控件，名称: '{name}', 子项数量: {len(children)}")
+                                return
+                    # 递归查找子控件
+                    for child in control.GetChildren():
+                        find_msg_list(child, depth + 1)
+                except Exception as e:
+                    print(f"遍历出错: {e}")
+                    pass
+            
+            if not msg_list or not msg_list.Exists(0, 0):
+                print("开始递归查找消息列表...")
+                find_msg_list(wechat_window)
+            
+            if not msg_list or not msg_list.Exists(0, 0):
+                print("未找到消息列表控件")
+                return []
+            
+            # 获取所有消息项
+            msg_items = msg_list.GetChildren()
+            messages = []
+            
+            for item in msg_items[-max_count:]:  # 只获取最后max_count条消息
+                try:
+                    if item.ControlTypeName != "ListItemControl":
+                        continue
+                        
+                    # 获取消息发送者和内容
+                    sender = ""
+                    content = ""
+                    msg_type = "text"
+                    all_text = []
+                    
+                    # 递归获取所有文本内容
+                    def get_all_text(element):
+                        try:
+                            if element.ControlTypeName == "TextControl" and element.Name.strip():
+                                all_text.append(element.Name.strip())
+                            for child in element.GetChildren():
+                                get_all_text(child)
+                        except:
+                            pass
+                    
+                    get_all_text(item)
+                    
+                    if len(all_text) == 0:
+                        # 检查是否是图片/文件/语音
+                        def check_media_type(element):
+                            try:
+                                if element.ControlTypeName == "ImageControl":
+                                    return "image"
+                                name = element.Name if hasattr(element, 'Name') else ""
+                                if "文件" in name or "接收" in name or "下载" in name:
+                                    return "file"
+                                if "语音" in name or "秒" in name or "'" in name and '"' not in name:
+                                    return "voice"
+                                for child in element.GetChildren():
+                                    res = check_media_type(child)
+                                    if res:
+                                        return res
+                            except:
+                                pass
+                            return None
+                        
+                        media_type = check_media_type(item)
+                        if media_type == "image":
+                            content = "[图片]"
+                            msg_type = "image"
+                        elif media_type == "file":
+                            content = "[文件]"
+                            msg_type = "file"
+                        elif media_type == "voice":
+                            content = "[语音消息]"
+                            msg_type = "voice"
+                        else:
+                            continue
+                    else:
+                        # 处理文本消息
+                        if len(all_text) >= 2:
+                            # 通常第一条是发送者，后面是内容
+                            sender = all_text[0]
+                            content = " ".join(all_text[1:])
+                        else:
+                            # 只有一条文本，可能是系统消息或者自己发送的消息
+                            sender = "系统消息"
+                            content = all_text[0]
+                    
+                    if content.strip():
+                        # 生成唯一消息ID
+                        msg_id = hash(f"{content}{time.time()}")
+                        messages.append({
+                            "id": msg_id,
+                            "sender": sender,
+                            "content": content.strip(),
+                            "type": msg_type,
+                            "time": time.strftime("%Y-%m-%d %H:%M:%S")
+                        })
+                except Exception as e:
+                    print(f"解析消息出错: {e}")
+                    continue
+            
+            return messages
+        except Exception as e:
+            print(f"获取消息失败: {e}")
+            return []
+    
+    def start_monitor(self, check_interval=2):
+        """
+        开始监控微信消息
+        check_interval: 检查新消息的间隔时间（秒）
+        """
+        if hasattr(self, 'monitoring') and self.monitoring:
+            return
+        
+        self.monitoring = True
+        self.message_callback = None
+        self.last_message_ids = set()
+        
+        import threading
+        
+        def monitor_loop():
+            print("微信消息监控已启动（UIAutomation方式）")
+            while self.monitoring:
+                try:
+                    # 获取当前所有消息
+                    messages = self.get_current_chat_messages(max_count=10)
+                    print(f"获取到 {len(messages)} 条消息")
+                    
+                    for msg in messages:
+                        msg_id = msg["id"]
+                        if msg_id not in self.last_message_ids:
+                            print(f"新消息: {msg['sender']}: {msg['content']}")
+                            # 新消息，调用回调函数
+                            if self.message_callback:
+                                self.message_callback(
+                                    msg["sender"],
+                                    msg["content"],
+                                    msg["time"],
+                                    msg["type"]
+                                )
+                            self.last_message_ids.add(msg_id)
+                    
+                    # 保留最近100条消息的ID，避免占用太多内存
+                    if len(self.last_message_ids) > 100:
+                        self.last_message_ids = set(list(self.last_message_ids)[-50:])
+                    
+                    time.sleep(check_interval)
+                except Exception as e:
+                    print(f"监控出错: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    time.sleep(check_interval)
+        
+        # 启动监控线程
+        monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        monitor_thread.start()
+    
+    def stop_monitor(self):
+        """停止消息监控"""
+        if hasattr(self, 'monitoring'):
+            self.monitoring = False
+            print("微信消息监控已停止")
+
+    # ==================== 精准最后一条消息监控 ====================
+    def start_last_message_monitor(self, callback=None, check_interval=1):
+        """
+        启动基于控件树的精准最后一条消息监控
+        这个方法直接监听当前打开聊天窗口的最后一条消息，适合弹窗提醒、关键词警报等场景
+        Args:
+            callback: 回调函数，参数为(last_text)，当最后一条消息变化时调用
+            check_interval: 检查间隔（秒），默认1秒
+        """
+        if hasattr(self, 'last_message_monitoring') and self.last_message_monitoring:
+            print("最后一条消息监控已经在运行中")
+            return
+        
+        self.last_message_monitoring = True
+        self.last_captured_text = ""
+        self.last_message_callback = callback
+        
+        import threading
+        
+        def monitor_loop():
+            print("✅ 精准最后一条消息监控已启动（控件树方式）")
+            print("🔍 开始监控最后一条消息...")
+            
+            while self.last_message_monitoring:
+                try:
+                    # 每次循环都确保微信窗口是打开且激活的
+                    # 解决远程桌面断开后窗口状态变化的问题
+                    self.open_wechat()
+                    time.sleep(0.5)
+                    
+                    # 每次循环都重新查找消息列表控件（应对界面刷新）
+                    msg_list = auto.ListControl(Name=self.lc.message)
+                    
+                    if not msg_list.Exists(1, 0.5):
+                        # 这一轮找不到，下一轮再试
+                        time.sleep(check_interval)
+                        continue
+                    
+                    items = msg_list.GetChildren()
+                    
+                    if items:
+                        last_item = items[-1]
+                        last_text = last_item.Name
+                        
+                        # 如果消息发生变化
+                        if last_text != self.last_captured_text:
+                            self.last_captured_text = last_text
+                            current_time = time.strftime("%H:%M:%S")
+                            print(f"\n[{current_time}] 最后一条消息已更新: '{last_text}'")
+                            
+                            # 调用回调函数
+                            if self.last_message_callback:
+                                try:
+                                    self.last_message_callback(last_text, current_time)
+                                except Exception as e:
+                                    print(f"回调函数执行出错: {e}")
+                                    
+                except Exception as e:
+                    # 忽略界面刷新时瞬间抓不到数据的偶发错误
+                    print(f"监控循环异常（这是正常的，会自动恢复）: {e}")
+                    pass
+                    
+                time.sleep(check_interval)
+        
+        # 启动监控线程
+        monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        monitor_thread.start()
+    
+    def stop_last_message_monitor(self):
+        """停止精准最后一条消息监控"""
+        if hasattr(self, 'last_message_monitoring'):
+            self.last_message_monitoring = False
+            print("精准最后一条消息监控已停止")
 
 
 if __name__ == '__main__':

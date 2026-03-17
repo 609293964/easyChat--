@@ -1,0 +1,13 @@
+easyChat 运行说明：
+
+1. 首先安装VC++运行库：
+   下载地址：https://aka.ms/vs/17/release/vc_redist.x64.exe
+   （必须安装，否则程序无法运行）
+
+2. 如果还是无法运行，请安装.NET Framework 4.8：
+   下载地址：https://dotnet.microsoft.com/zh-cn/download/dotnet-framework/net48
+
+3. 程序目录说明：
+   - easyChat.exe 主程序
+   - config.json 配置文件（保存你的设置）
+   - 运行库安装包/ 文件夹里包含需要的运行库

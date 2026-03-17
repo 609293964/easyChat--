@@ -3,6 +3,7 @@ import time
 import os
 import itertools
 import json
+import datetime
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
@@ -14,6 +15,9 @@ from wechat_locale import WeChatLocale
 
 
 class WechatGUI(QWidget):
+    # 定义信号，用于将后台线程的UI更新操作切回主线程
+    new_message_signal = pyqtSignal(str)
+    alert_message_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -48,6 +52,10 @@ class WechatGUI(QWidget):
         # 发消息的用户列表
         self.contacts = []
 
+        # 连接跨线程UI更新信号
+        self.new_message_signal.connect(self._append_monitor_message)
+        self.alert_message_signal.connect(self._append_monitor_message)
+
         # 初始化图形界面
         self.initUI()
 
@@ -57,6 +65,24 @@ class WechatGUI(QWidget):
         
         # 自动打开提示
         self.show_wechat_open_notice()
+
+    # 重写关闭事件，确保程序完全退出
+    def closeEvent(self, event):
+        # 停止所有定时器
+        if hasattr(self, 'clock') and self.clock.time_counting:
+            self.clock.time_counting = False
+            self.clock.quit()
+            self.clock.wait()
+        
+        if hasattr(self, 'sync_folder_timer'):
+            self.sync_folder_timer.stop()
+        
+        # 移除热键
+        keyboard.unhook_all()
+        
+        # 退出应用程序
+        QApplication.quit()
+        event.accept()
 
     # 显示微信打开方式变更提示
     def show_wechat_open_notice(self):
@@ -218,12 +244,11 @@ class WechatGUI(QWidget):
         def add_contact():
             inputs = [
                 "注：在每一个时间输入框内都可以使用英文逗号“,“来一次性区分多个数值进行多次定时。\n(例：分钟框输入 10,20,30,40)",
+                "年 (例如: 2026)",
                 "月 (1~12)",
                 "日 (1~31)",
                 "小时（0~23）",
                 "分钟 (0~59)",
-                "发送信息的起点（从哪一条开始发）",
-                "发送信息的终点（到哪一条结束，包括该条）",
             ]
 
             # 设置默认值为当前时间
@@ -234,14 +259,17 @@ class WechatGUI(QWidget):
                 str(local_time.tm_mday),
                 str(local_time.tm_hour),
                 str(local_time.tm_min),
-                "",
-                "",
             ]
 
             dialog = MultiInputDialog(inputs, default_values)
             if dialog.exec_() == QDialog.Accepted:
-                year, month, day, hour, min, st, ed = dialog.get_input()
-                if year == "" or month == "" or day == "" or hour == "" or min == "" or st == "" or ed == "":
+                input_values = dialog.get_input()
+                if len(input_values) != 6:
+                    QMessageBox.warning(self, "输入错误", "输入项不匹配！")
+                    return
+                    
+                note, year, month, day, hour, min = input_values
+                if year == "" or month == "" or day == "" or hour == "" or min == "":
                     QMessageBox.warning(self, "输入错误", "输入不能为空！")
                     return
 
@@ -251,9 +279,12 @@ class WechatGUI(QWidget):
                     day_list = [d.strip() for d in day.split(',')]
                     hour_list = [h.strip() for h in hour.split(',')]
                     min_list = [m.strip() for m in min.split(',')]
+                    
+                    # 默认发送全部内容
+                    send_range = f"1-{max(1, self.msg.count())}"
 
                     for year, month, day, hour, min in itertools.product(year_list, month_list, day_list, hour_list, min_list):
-                        input = f"{year} {month} {day} {hour} {min} {st}-{ed}"
+                        input = f"{year} {month} {day} {hour} {min} {send_range}"
                         self.time_view.addItem(input)
                     
                     update_schedules()
@@ -326,9 +357,110 @@ class WechatGUI(QWidget):
         prevent_btn = QPushButton("防止自动下线：（目前关闭）")
         prevent_btn.clicked.connect(prevent_offline)
 
+        # 新增：智能随机批量生成定时时间的函数
+        def add_batch_time():
+            import random
+            msg_count = max(1, self.msg.count())
+            inputs = [
+                f"当前有 {msg_count} 条待发送内容，将生成对应数量的定时任务",
+                "开始时间段（例如: 19:30 表示从晚上7点30分开始）",
+                "结束时间段（例如: 23:00 表示到晚上11点结束）",
+                "随机波动范围（分钟，例如: 15 表示每个时间点在范围内随机）",
+                "要生成的天数（例如: 7 表示生成未来7天的定时任务）",
+            ]
+            default_values = ["", "19:30", "23:00", "15", "1"]
+            dialog = MultiInputDialog(inputs, default_values)
+            if dialog.exec_() == QDialog.Accepted:
+                input_values = dialog.get_input()
+                if len(input_values) == 5:
+                    note, start_time, end_time, random_range, days = input_values
+                else:
+                    # 兼容旧版本输入
+                    start_time, end_time, _, random_range, days = input_values
+                
+                try:
+                    # 解析输入
+                    random_range = int(random_range)
+                    days = int(days)
+                    msg_count = max(1, self.msg.count())
+                    
+                    # 解析开始和结束时间
+                    start_hour, start_minute = map(int, start_time.split(':'))
+                    end_hour, end_minute = map(int, end_time.split(':'))
+                    
+                    # 转换为总分钟数便于计算
+                    start_total = start_hour * 60 + start_minute
+                    end_total = end_hour * 60 + end_minute
+                    total_duration = end_total - start_total
+                    
+                    if end_total <= start_total:
+                        QMessageBox.warning(self, "输入错误", "结束时间必须晚于开始时间！")
+                        return
+                    
+                    # 获取当前日期
+                    today = datetime.datetime.now().date()
+                    
+                    # 生成所有时间点
+                    added_count = 0
+                    for day_offset in range(days):
+                        current_date = today + datetime.timedelta(days=day_offset)
+                        
+                        # 计算每条内容的平均间隔
+                        if msg_count == 1:
+                            # 只有1条内容时，在时间段内随机一个时间
+                            base_time = start_total + random.randint(0, total_duration)
+                            offset = random.randint(-random_range, random_range)
+                            actual_time = max(start_total, min(base_time + offset, end_total))
+                            hour = actual_time // 60
+                            minute = actual_time % 60
+                            # 每条内容对应一个时间点，发送对应序号的内容
+                            time_str = f"{current_date.year} {current_date.month} {current_date.day} {hour} {minute} 1-1"
+                            self.time_view.addItem(time_str)
+                            added_count += 1
+                        else:
+                            # 多条内容时，平均分配时间
+                            interval = total_duration // (msg_count - 1)
+                            for msg_index in range(msg_count):
+                                # 计算基础时间点（平均分布）
+                                base_time = start_total + msg_index * interval
+                                # 生成随机偏移量
+                                offset = random.randint(-random_range, random_range)
+                                actual_time = max(start_total, min(base_time + offset, end_total))
+                                
+                                # 转换为小时和分钟
+                                hour = actual_time // 60
+                                minute = actual_time % 60
+                                
+                                # 每条内容对应一个时间点，发送对应序号的内容
+                                msg_num = msg_index + 1
+                                time_str = f"{current_date.year} {current_date.month} {current_date.day} {hour} {minute} {msg_num}-{msg_num}"
+                                self.time_view.addItem(time_str)
+                                added_count += 1
+                    
+                    # 更新配置
+                    update_schedules()
+                    QMessageBox.information(self, "生成成功", f"已成功生成 {added_count} 个随机定时任务！\n\n提示：\n• 有 {msg_count} 条待发送内容，生成了对应数量的时间点\n• 每个时间点在平均时间前后{random_range}分钟内随机\n• 所有时间都在你设定的时间段范围内\n• 每个时间点发送对应序号的1条内容，发完即止")
+                    
+                except Exception as e:
+                    QMessageBox.warning(self, "输入错误", f"输入格式不正确，请检查！\n错误信息：{e}")
+
         vbox.addWidget(info)
         vbox.addWidget(add_btn)
         vbox.addWidget(del_btn)
+        # 新增：一键删除所有时间按钮
+        clear_all_btn = QPushButton("清空所有定时")
+        def clear_all_schedules():
+            reply = QMessageBox.question(self, "确认清空", "确定要删除所有定时任务吗？", 
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.time_view.clear()
+                update_schedules()
+                QMessageBox.information(self, "清空成功", "所有定时任务已删除！")
+        clear_all_btn.clicked.connect(clear_all_schedules)
+        vbox.addWidget(clear_all_btn)
+        batch_btn = QPushButton("智能生成随机定时")
+        batch_btn.clicked.connect(add_batch_time)
+        vbox.addWidget(batch_btn)
         vbox.addWidget(start_btn)
         vbox.addWidget(end_btn)
         vbox.addWidget(prevent_btn)
@@ -448,6 +580,15 @@ class WechatGUI(QWidget):
                             # 判断为文件内容
                             elif type == "file":
                                 self.wechat.send_file(name, content, search_user)
+                                # 如果开启了自动删除文件功能，则删除源文件
+                                if self.auto_delete_files.isChecked():
+                                    try:
+                                        import os
+                                        if os.path.exists(content):
+                                            os.remove(content)
+                                            print(f"已自动删除文件: {content}")
+                                    except Exception as e:
+                                        print(f"删除文件失败: {content}, 错误: {e}")
 
                             # 搜索用户只在第一次发送时进行
                             search_user = False
@@ -475,6 +616,133 @@ class WechatGUI(QWidget):
         send_btn = QPushButton("发送")
         send_btn.clicked.connect(send_msg)
 
+        # 新增：发送后自动删除文件的复选框
+        self.auto_delete_files = QCheckBox("发送文件后自动删除源文件")
+        # 从配置中读取上次的设置，默认关闭
+        self.auto_delete_files.setChecked(self.config["settings"].get("auto_delete_files", False))
+        
+        # 保存设置到配置
+        def toggle_auto_delete(state):
+            self.config["settings"]["auto_delete_files"] = (state == Qt.Checked)
+            self.save_config()
+        
+        self.auto_delete_files.stateChanged.connect(toggle_auto_delete)
+
+        # 新增：同步文件夹功能
+        self.sync_folder_enabled = QCheckBox("启用文件夹同步到待发送列表")
+        self.sync_folder_path = QLineEdit()
+        self.sync_folder_path.setPlaceholderText("选择要同步的文件夹路径")
+        self.sync_folder_btn = QPushButton("选择文件夹")
+        self.sync_folder_manual_btn = QPushButton("立即同步")
+        self.sync_folder_timer = QTimer(self)
+        self.sync_folder_timer.setInterval(10000)  # 每10秒检查一次文件夹变化，资源占用极低
+        self.sync_folder_last_mtime = 0  # 记录文件夹上次修改时间
+        
+        # 从配置中读取上次的设置
+        self.sync_folder_enabled.setChecked(self.config["settings"].get("sync_folder_enabled", False))
+        self.sync_folder_path.setText(self.config["settings"].get("sync_folder_path", ""))
+        
+        # 选择文件夹按钮响应
+        def choose_sync_folder():
+            folder_path = QFileDialog.getExistingDirectory(self, "选择要同步的文件夹")
+            if folder_path:
+                self.sync_folder_path.setText(folder_path)
+                self.config["settings"]["sync_folder_path"] = folder_path
+                self.save_config()
+                # 如果同步功能已开启，立即同步一次
+                if self.sync_folder_enabled.isChecked():
+                    sync_folder_files()
+        
+        # 同步文件夹文件到待发送列表
+        def sync_folder_files():
+            if not self.sync_folder_enabled.isChecked():
+                return
+                
+            folder_path = self.sync_folder_path.text().strip()
+            if not folder_path or not os.path.exists(folder_path):
+                return
+                
+            try:
+                # 先检查文件夹是否有变化，没有变化则不同步
+                current_mtime = os.path.getmtime(folder_path)
+                if current_mtime == self.sync_folder_last_mtime:
+                    return
+                self.sync_folder_last_mtime = current_mtime
+                
+                # 获取文件夹下的所有文件（不包含子文件夹）
+                file_list = []
+                for filename in os.listdir(folder_path):
+                    file_path = os.path.join(folder_path, filename)
+                    if os.path.isfile(file_path):
+                        file_list.append(file_path)
+                
+                # 获取当前选中的项和滚动位置，同步后恢复
+                selected_items = [item.text() for item in self.msg.selectedItems()]
+                scroll_pos = self.msg.verticalScrollBar().value()
+                
+                # 先清除当前消息列表中不是来自同步文件夹的文件项保留，同步文件夹的文件项更新
+                current_items = []
+                for i in range(self.msg.count()):
+                    item_text = self.msg.item(i).text()
+                    # 检查是否是文件类型
+                    if item_text.split(':')[1] == 'file':
+                        # 提取文件路径
+                        _, _, to, content = item_text.split(':', 3)
+                        # 如果不是同步文件夹中的文件，保留；否则添加到保留列表
+                        if os.path.dirname(content) == folder_path.rstrip(os.sep):
+                            continue
+                    current_items.append(item_text)
+                
+                # 添加同步文件夹中的所有文件
+                for file_path in file_list:
+                    # 默认发送给所有人
+                    current_items.append(f"{len(current_items)+1}:file:all:{file_path}")
+                
+                # 重新加载列表
+                self.msg.clear()
+                for item in current_items:
+                    list_item = QListWidgetItem(item)
+                    self.msg.addItem(list_item)
+                    # 恢复选中状态
+                    if item in selected_items:
+                        list_item.setSelected(True)
+                
+                # 恢复滚动位置
+                self.msg.verticalScrollBar().setValue(scroll_pos)
+                
+                # 更新配置
+                update_messages()
+                
+            except Exception as e:
+                print(f"同步文件夹失败: {e}")
+        
+        # 切换同步功能开关
+        def toggle_sync_folder(state):
+            enabled = (state == Qt.Checked)
+            self.config["settings"]["sync_folder_enabled"] = enabled
+            self.save_config()
+            
+            if enabled:
+                # 立即同步一次
+                sync_folder_files()
+                # 启动定时器
+                self.sync_folder_timer.start()
+                QMessageBox.information(self, "同步提示", "文件夹同步已开启！\n\n提示：\n1. 每10秒自动检查文件夹变化，资源占用极低\n2. 也可以点击「立即同步」按钮手动同步\n3. 同步不会删除你手动添加的消息和文件\n4. 选择的项和滚动位置会自动保留，不会影响操作")
+            else:
+                # 停止定时器
+                self.sync_folder_timer.stop()
+                QMessageBox.information(self, "同步提示", "文件夹同步已关闭！")
+        
+        # 绑定事件
+        self.sync_folder_btn.clicked.connect(choose_sync_folder)
+        self.sync_folder_manual_btn.clicked.connect(sync_folder_files)
+        self.sync_folder_enabled.stateChanged.connect(toggle_sync_folder)
+        self.sync_folder_timer.timeout.connect(sync_folder_files)
+        
+        # 如果启动时已开启同步，启动定时器
+        if self.sync_folder_enabled.isChecked():
+            self.sync_folder_timer.start()
+
         # 发送不同用户时的间隔
         send_interval = MySpinBox("发送不同用户时的间隔（秒）")
         send_interval.spin_box.setValue(self.config["settings"]["send_interval"])
@@ -490,6 +758,16 @@ class WechatGUI(QWidget):
         vbox_left.addWidget(info)
         vbox_left.addWidget(self.msg)
         vbox_left.addWidget(send_interval)
+        vbox_left.addWidget(self.auto_delete_files)
+        
+        # 同步文件夹布局
+        sync_folder_layout = QHBoxLayout()
+        sync_folder_layout.addWidget(self.sync_folder_enabled)
+        sync_folder_layout.addWidget(self.sync_folder_path)
+        sync_folder_layout.addWidget(self.sync_folder_btn)
+        sync_folder_layout.addWidget(self.sync_folder_manual_btn)
+        vbox_left.addLayout(sync_folder_layout)
+        
         vbox_left.addWidget(send_btn)
 
         # 右边的选择内容界面
@@ -592,6 +870,198 @@ class WechatGUI(QWidget):
 
         # 定时界面
         clock = self.init_clock()
+        
+        # 消息监控界面
+        def init_monitor():
+            # 创建滚动区域
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_content = QWidget()
+            
+            hbox = QHBoxLayout(scroll_content)
+            
+            # 左边的消息显示区域（占70%宽度）
+            vbox_left = QVBoxLayout()
+            info = QLabel("消息监控（实时显示收到的新消息）")
+            self.monitor_view = QListWidget()
+            self.monitor_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            vbox_left.addWidget(info)
+            vbox_left.addWidget(self.monitor_view)
+            hbox.addLayout(vbox_left, stretch=7)
+            
+            # 右边的按钮和关键词警报区域（占30%宽度，支持滚动）
+            scroll_right = QScrollArea()
+            scroll_right.setWidgetResizable(True)
+            content_right = QWidget()
+            vbox_right = QVBoxLayout(content_right)
+            vbox_right.addStretch(1)
+            
+            # ========== 普通消息监控 ==========
+            # 监控开关
+            self.monitor_btn = QPushButton("开始监控消息")
+            self.monitor_running = False
+            
+            # 槽函数：在主线程中添加监控消息
+            def _append_monitor_message(msg):
+                self.monitor_view.addItem(msg)
+                # 自动滚动到底部
+                self.monitor_view.scrollToBottom()
+                # 最多保存100条消息
+                if self.monitor_view.count() > 100:
+                    self.monitor_view.takeItem(0)
+
+            # 消息回调函数（在后台线程调用，通过信号切到主线程更新UI）
+            def on_new_message(sender, content, time, msg_type):
+                # 在监控列表中显示新消息
+                msg = f"[{time}] [{msg_type}] {sender}: {content}"
+                self.new_message_signal.emit(msg)
+            
+            def toggle_monitor():
+                if not self.monitor_running:
+                    # 开始监控
+                    self.wechat.set_message_callback(on_new_message)
+                    self.wechat.start_monitor(check_interval=2)
+                    self.monitor_running = True
+                    self.monitor_btn.setText("停止监控消息")
+                    self.monitor_btn.setStyleSheet("color:red")
+                    QMessageBox.information(self, "监控已启动", "微信消息监控已启动！\n\n提示：\n• 基于UIAutomation技术\n• 支持文本、图片、文件、语音识别\n• 微信窗口可以在后台运行")
+                else:
+                    # 停止监控
+                    self.wechat.stop_monitor()
+                    self.monitor_running = False
+                    self.monitor_btn.setText("开始监控消息")
+                    self.monitor_btn.setStyleSheet("color:black")
+                    QMessageBox.information(self, "监控已停止", "微信消息监控已停止！")
+            
+            self.monitor_btn.clicked.connect(toggle_monitor)
+            
+            # 清空消息按钮
+            clear_monitor_btn = QPushButton("清空消息列表")
+            def clear_monitor():
+                self.monitor_view.clear()
+            clear_monitor_btn.clicked.connect(clear_monitor)
+            
+            # 获取聊天列表按钮
+            get_chat_list_btn = QPushButton("获取聊天列表")
+            def show_chat_list():
+                chat_list = self.wechat.get_chat_list()
+                if chat_list:
+                    QMessageBox.information(self, "聊天列表", "\n".join(chat_list[:20]) + ("\n..." if len(chat_list) > 20 else ""))
+                else:
+                    QMessageBox.warning(self, "获取失败", "未获取到聊天列表，请确保微信窗口已打开！")
+            get_chat_list_btn.clicked.connect(show_chat_list)
+            
+            vbox_right.addWidget(self.monitor_btn)
+            vbox_right.addWidget(clear_monitor_btn)
+            vbox_right.addWidget(get_chat_list_btn)
+            
+            # ========== 精准最后一条消息监控（关键词警报） ==========
+            # 添加分隔线
+            vbox_right.addWidget(QLabel("------------------------"))
+            vbox_right.addWidget(QLabel("🔔 单窗口关键词警报"))
+            
+            # 关键词输入框
+            keyword_label = QLabel("触发关键词（多个用|分隔，例如 !|！|加急）")
+            self.keyword_input = QLineEdit()
+            # 默认值：匹配感叹号
+            self.keyword_input.setText("!|！")
+            keyword_hint = QLabel("提示：保持聊天窗口打开即可持续监控")
+            keyword_hint.setStyleSheet("color:gray; font-size: 10px")
+            
+            # 警报开关
+            self.alert_btn = QPushButton("启动单窗口警报")
+            self.alert_running = False
+            self.last_alert_state = False
+            
+            def on_last_message_change(last_text, current_time):
+                # 获取当前设置的关键词
+                keywords = self.keyword_input.text().strip()
+                if not keywords:
+                    return
+                    
+                # 检查是否包含任何关键词
+                has_keyword = False
+                for kw in keywords.split('|'):
+                    if kw.strip() and kw in last_text:
+                        has_keyword = True
+                        break
+                
+                # 每一条新消息只要包含关键词就触发警报
+                if has_keyword:
+                    # 添加到消息列表（通过信号切到主线程）
+                    msg = f"[{current_time}] 🚨 警报: 检测到关键词 '{last_text}'"
+                    self.alert_message_signal.emit(msg)
+                    # 弹出提示框 - QMessageBox::warning 会自动切到主线程执行，但为了保险也放在信号里？
+                    # 实际上 QMessageBox 即使在后台线程调用也会出问题，所以需要用信号触发
+                    # 定义 lambda 来捕获变量并弹出提示
+                    def show_alert():
+                        QMessageBox.warning(self, "关键词警报", 
+                            f"检测到包含关键词的新消息！\n\n时间: {current_time}\n内容: {last_text}\n\n"
+                            "请及时查看处理。")
+                    # 使用 QTimer.singleShot 在主线程执行
+                    QTimer.singleShot(0, show_alert)
+                
+                # 状态记录（只用于记录解除信息，不阻塞重复警报）
+                if has_keyword != self.last_alert_state:
+                    if not has_keyword and self.last_alert_state:
+                        # 警报解除
+                        msg = f"[{current_time}] ✅ 警报解除: 当前内容 '{last_text}'"
+                        self.alert_message_signal.emit(msg)
+                    self.last_alert_state = has_keyword
+            
+            def toggle_alert():
+                if not self.alert_running:
+                    # 检查关键词是否为空
+                    keywords = self.keyword_input.text().strip()
+                    if not keywords:
+                        QMessageBox.warning(self, "输入错误", "请先输入触发关键词！")
+                        return
+                    
+                    # 开始监控
+                    self.wechat.start_last_message_monitor(callback=on_last_message_change, check_interval=1)
+                    self.alert_running = True
+                    self.last_alert_state = False
+                    self.alert_btn.setText("停止单窗口警报")
+                    self.alert_btn.setStyleSheet("color:red")
+                    QMessageBox.information(self, "警报已启动", 
+                        "单窗口精准关键词警报已启动！\n\n"
+                        "说明：\n"
+                        "• 监控当前打开聊天窗口的最后一条消息\n"
+                        "• 当消息包含你设置的关键词时会弹窗提醒\n"
+                        "• 关键词用 | 分隔，支持多关键词匹配\n"
+                        "• 每条新消息只要含关键词都会触发警报\n"
+                        "• 保持聊天窗口打开即可持续监控")
+                else:
+                    # 停止监控
+                    self.wechat.stop_last_message_monitor()
+                    self.alert_running = False
+                    self.alert_btn.setText("启动单窗口警报")
+                    self.alert_btn.setStyleSheet("color:black")
+                    QMessageBox.information(self, "警报已停止", "单窗口关键词警报已停止！")
+            
+            self.alert_btn.clicked.connect(toggle_alert)
+            
+            vbox_right.addWidget(keyword_label)
+            vbox_right.addWidget(self.keyword_input)
+            vbox_right.addWidget(keyword_hint)
+            vbox_right.addWidget(self.alert_btn)
+            vbox_right.addStretch()
+            
+            # 完成右侧滚动区域
+            content_right.setLayout(vbox_right)
+            scroll_right.setWidget(content_right)
+            hbox.addWidget(scroll_right, stretch=3)
+            
+            # 设置滚动区域内容
+            scroll_content.setLayout(hbox)
+            scroll_area.setWidget(scroll_content)
+            
+            # 返回滚动区域布局（占满全屏）
+            vbox_wrapper = QVBoxLayout()
+            vbox_wrapper.addWidget(scroll_area)
+            return vbox_wrapper
+        
+        monitor = init_monitor()
 
         vbox.addWidget(self.wechat_notice_btn)
         vbox.addLayout(lang)
@@ -600,6 +1070,8 @@ class WechatGUI(QWidget):
         vbox.addLayout(msg_widget)
         vbox.addStretch(5)
         vbox.addLayout(clock)
+        vbox.addStretch(5)
+        vbox.addLayout(monitor)
         vbox.addStretch(1)
 
         # qle.textChanged[str].connect(self.onChanged)
