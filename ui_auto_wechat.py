@@ -108,7 +108,6 @@ class WeChat:
     def press_enter(self):
         auto.SendKeys("{enter}")
 
-    # 获取输入框焦点
     def _focus_input_box(self):
         self.open_wechat()
         wechat_window = self.get_wechat()
@@ -142,20 +141,25 @@ class WeChat:
             pyautogui.click(screen_width // 2, int(screen_height * 0.85))
             time.sleep(0.2)
 
-    # 【新增】发送文本逻辑
     def send_text(self, name: str, text: str, search_user: bool = True) -> None:
         if search_user:
             self.get_contact(name)
         else:
             self._focus_input_box()
             
+        # 【优化】备份原有剪贴板，防止发消息时破坏用户的复制内容
+        clipboard = QApplication.clipboard()
+        old_text = clipboard.text()
+
         auto.SetClipboardText(text)
         time.sleep(0.3)
         auto.SendKeys("{Ctrl}v")
         time.sleep(0.5)
         self.press_enter()
+        
+        if old_text:
+            auto.SetClipboardText(old_text)
 
-    # 发送文件/图片逻辑
     def send_file(self, name: str, path: str, search_user: bool = True) -> None:
         if search_user:
             self.get_contact(name)
@@ -177,18 +181,24 @@ class WeChat:
         self.last_message_callback = callback
         
         def monitor_loop():
+            # 【优化】加入列表控件的缓存，避免高频在整个树中检索 ListControl 导致的高 CPU 占用
+            cached_msg_list = None
+            
             while self.last_message_monitoring:
                 try:
                     self.open_wechat()
                     time.sleep(0.5)
                     
-                    msg_list = auto.ListControl(Name=self.lc.message)
+                    if cached_msg_list is None or not cached_msg_list.Exists(0, 0):
+                        wechat_win = self.get_wechat()
+                        # 【优化】限定搜索深度，大幅提升检索性能
+                        cached_msg_list = wechat_win.ListControl(Name=self.lc.message, searchDepth=15)
                     
-                    if not msg_list.Exists(1, 0.5):
+                    if not cached_msg_list.Exists(1, 0.5):
                         time.sleep(check_interval)
                         continue
                     
-                    items = msg_list.GetChildren()
+                    items = cached_msg_list.GetChildren()
                     
                     if items:
                         last_item = items[-1]
@@ -201,10 +211,11 @@ class WeChat:
                             if self.last_message_callback:
                                 try:
                                     self.last_message_callback(last_text, current_time)
-                                except Exception as e:
+                                except Exception:
                                     pass
                                     
                 except Exception:
+                    cached_msg_list = None  # 出错后重置缓存
                     pass
                     
                 time.sleep(check_interval)

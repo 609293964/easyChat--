@@ -99,6 +99,8 @@ class MomoReplyGUI(QWidget):
         if self.auto_timer is not None:
             self.stop_auto_timer_check()
         event.accept()
+        # 【优化】强制结束进程树，彻底根除关闭软件后后台依然有进程残留的问题
+        os._exit(0)
 
     def show_wechat_open_notice(self):
         msg_box = QMessageBox(self)
@@ -114,9 +116,7 @@ class MomoReplyGUI(QWidget):
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec_()
 
-    # --- 修正版：彻底关闭微信 -> 开讲述人 -> 开微信 -> 关讲述人 ---
     def auto_wake_wechat(self):
-        # 防误触二次确认
         reply = QMessageBox.question(self, '确认重启微信',
                                      "此操作将强制关闭您当前正在运行的微信，\n并在后台开启无障碍环境后重新启动它。\n\n重启后您可能需要重新点击登录。\n是否继续执行？",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -129,27 +129,23 @@ class MomoReplyGUI(QWidget):
         
         def task():
             try:
-                # 1. 彻底杀掉微信进程
                 self.add_log("🛑 正在强制关闭微信...")
                 os.system("taskkill /F /IM WeChat.exe >nul 2>&1")
                 time.sleep(2.0)
                 
-                # 2. 启动讲述人
                 self.add_log("👁️ 正在开启 Windows 讲述人...")
                 os.system("start narrator")
-                time.sleep(3.0) # 等待讲述人完全就绪
+                time.sleep(3.0) 
                 
-                # 3. 启动微信
                 wechat_path = self.config.get("settings", {}).get("wechat_path", "")
                 if wechat_path and os.path.exists(wechat_path):
                     self.add_log("🚀 正在以无障碍环境重新启动微信...")
                     import subprocess
                     subprocess.Popen(wechat_path)
-                    time.sleep(6.0) # 给微信充足的启动和加载时间
+                    time.sleep(6.0) 
                 else:
                     self.add_log("❌ 唤醒失败：微信exe路径配置不正确！")
                     
-                # 4. 关闭讲述人
                 self.add_log("🤫 微信已重新调起，正在关闭讲述人...")
                 os.system("taskkill /F /IM narrator.exe >nul 2>&1")
                 
@@ -487,29 +483,25 @@ class MomoReplyGUI(QWidget):
                 half_range = random_range / 2
                 actual_delay = max(0, random.uniform(base_delay - half_range, base_delay + half_range) if random_range > 0 else base_delay)
                 self.add_log(f"⏳ 将在 {actual_delay:.1f} 分钟后执行回复...")
-                delay_seconds = int(actual_delay * 60)
+                delay_ms = int(actual_delay * 60 * 1000)
                 
-                def delayed_send():
-                    wait_time = delay_seconds
-                    while wait_time > 0:
-                        if not getattr(self, 'monitoring', False):
-                            self.add_log("⏹️ 监控已停止，取消本次延迟发送")
-                            self.last_triggered = False
-                            return
-                        time.sleep(1)
-                        wait_time -= 1
-                        
-                    if getattr(self, 'monitoring', False):
-                        self._do_send_action(trigger_sender, matched_rule)
-                        
-                threading.Thread(target=delayed_send, daemon=True).start()
+                # 【优化】利用 PyQt 的 QTimer 来处理并发延时，解决原生 Thread 对主界面安全性的影响
+                QTimer.singleShot(delay_ms, lambda: self._do_send_action_if_monitoring(trigger_sender, matched_rule))
             else:
                 self._do_send_action(trigger_sender, matched_rule)
                 
         elif not matched_rule and self.last_triggered:
             self.last_triggered = False
             self.add_log(f"✅ 状态重置：对方最新消息变成了: '{last_text}'")
-    
+
+    # 【优化】安全检查方法，防止在延时期间取消了监控依然被发送
+    def _do_send_action_if_monitoring(self, trigger_sender, rule):
+        if not getattr(self, 'monitoring', False):
+            self.add_log("⏹️ 监控已停止，取消本次延迟发送")
+            self.last_triggered = False
+            return
+        self._do_send_action(trigger_sender, rule)
+
     def _do_send_action(self, trigger_sender, rule):
         if not self.monitoring:
             return
@@ -536,17 +528,27 @@ class MomoReplyGUI(QWidget):
                 self.wechat.send_file(trigger_sender, selected_image, search_user=False)
                 self.add_log(f"📤 图片发送完毕")
                 
-                time.sleep(1.0) 
-                try:
-                    os.remove(selected_image)
-                    self.add_log(f"🗑️ 已安全删除: {os.path.basename(selected_image)}")
-                except PermissionError:
-                    self.add_log(f"⚠️ 图片正被微信占用未能删除，请稍后手动清理。")
+                # 【优化】使用后台定时器安全清理文件，防止文件正被微信读取时触发的 PermissionError
+                self.add_log(f"🕒 已加入后台清理队列(1分钟后清理): {os.path.basename(selected_image)}")
+                QTimer.singleShot(60000, lambda path=selected_image: self._safe_remove_image(path))
                     
         except Exception as e:
             self.add_log(f"❌ 发送失败: {str(e)}")
         finally:
             self.last_triggered = False
+
+    # 【优化】异常捕获与重试的安全删除
+    def _safe_remove_image(self, file_path):
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                self.add_log(f"🗑️ 已安全删除: {os.path.basename(file_path)}")
+        except PermissionError:
+            self.add_log(f"⚠️ 图片仍被微信占用，延长清理时间: {os.path.basename(file_path)}")
+            # 再次延迟 2 分钟强制清理
+            QTimer.singleShot(120000, lambda: os.remove(file_path) if os.path.exists(file_path) else None)
+        except Exception:
+            pass
 
     def start_monitoring(self):
         if self.monitoring: return
@@ -617,7 +619,6 @@ class MomoReplyGUI(QWidget):
         header_hbox = QHBoxLayout()
         header_hbox.addLayout(self.init_language_choose())
         
-        # 修正的唤醒按钮
         self.wake_btn = QPushButton("🛠️ 一键重启并唤醒微信", self)
         self.wake_btn.setStyleSheet("background-color: #FFFACD; padding: 5px;")
         self.wake_btn.clicked.connect(self.auto_wake_wechat)
