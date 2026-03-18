@@ -20,11 +20,14 @@ class MomoReplyGUI(QWidget):
         super().__init__()
 
         self.config_path = "wechat_config_momo.json"
+        
+        # 优化：使用系统通用路径代替个人写死的硬编码路径
         default_material_folder = os.path.join(os.path.expanduser("~"), "Desktop", "素材")
         
         if os.path.exists(self.config_path):
             with open(self.config_path, "r", encoding="utf-8") as r:
                 self.config = json.load(r)
+                # 确保旧配置文件也有 settings 字典
                 if "settings" not in self.config:
                     self.config["settings"] = {}
         else:
@@ -45,6 +48,7 @@ class MomoReplyGUI(QWidget):
         )
         
         self.monitoring = False
+        self.monitor_thread = None
         self.last_triggered = False
         self.auto_timer = None
 
@@ -61,6 +65,7 @@ class MomoReplyGUI(QWidget):
         with open(self.config_path, "w", encoding="utf8") as w:
             json.dump(self.config, w, indent=4, ensure_ascii=False)
 
+    # 优化：提取公共的获取合法图片列表的方法 (DRY原则)
     def get_valid_images(self, folder):
         if not os.path.exists(folder):
             return []
@@ -73,15 +78,11 @@ class MomoReplyGUI(QWidget):
         return images
 
     def closeEvent(self, event):
-        self.monitoring = False
-        self.last_triggered = False
-        
-        if hasattr(self, 'wechat') and hasattr(self.wechat, 'stop_last_message_monitor'):
-            self.wechat.stop_last_message_monitor()
-            
+        if self.monitoring:
+            self.stop_monitoring()
         if self.auto_timer is not None:
             self.stop_auto_timer_check()
-            
+        QApplication.quit()
         event.accept()
 
     def show_wechat_open_notice(self):
@@ -92,8 +93,8 @@ class MomoReplyGUI(QWidget):
         msg_box.setInformativeText(
             "由于微信版本更新，我们现在使用微信内置的快捷键来打开/隐藏微信窗口，请确保你的微信打开快捷键为Ctrl+Alt+w。具体查看方式为“设置”->“快捷键”->“显示/隐藏窗口”\n\n"
             "⚠️ 使用说明：\n"
-            "• 请打开并保持与指定联系人的聊天窗口在前台\n"
-            "• 当对方发送满足【触发关键词】条件的消息时，自动随机回复素材文件夹中的一张图片\n"
+            "• 请打开并保持与momo的聊天窗口在前台\n"
+            "• 当momo发送包含感叹号的消息时，自动随机回复素材文件夹中的一张图片\n"
             "• 图片发送后会自动从素材文件夹中删除，避免重复发送\n\n"
         )
         msg_box.setStandardButtons(QMessageBox.Ok)
@@ -101,9 +102,15 @@ class MomoReplyGUI(QWidget):
 
     def init_language_choose(self):
         def switch_language():
-            lang = "zh-CN" if lang_zh_CN_btn.isChecked() else "zh-TW" if lang_zh_TW_btn.isChecked() else "en-US"
-            self.wechat.lc = WeChatLocale(lang)
-            self.config["settings"]["language"] = lang
+            if lang_zh_CN_btn.isChecked():
+                self.wechat.lc = WeChatLocale("zh-CN")
+                self.config["settings"]["language"] = "zh-CN"
+            elif lang_zh_TW_btn.isChecked():
+                self.wechat.lc = WeChatLocale("zh-TW")
+                self.config["settings"]["language"] = "zh-TW"
+            elif lang_en_btn.isChecked():
+                self.wechat.lc = WeChatLocale("en-US")
+                self.config["settings"]["language"] = "en-US"
             self.save_config()
 
         info = QLabel("请选择你的微信系统语言")
@@ -111,10 +118,14 @@ class MomoReplyGUI(QWidget):
         lang_zh_TW_btn = QRadioButton("繁体中文")
         lang_en_btn = QRadioButton("English")
 
+        # 优化：安全获取字典值
         current_lang = self.config.get("settings", {}).get("language", "zh-CN")
-        if current_lang == "zh-CN": lang_zh_CN_btn.setChecked(True)
-        elif current_lang == "zh-TW": lang_zh_TW_btn.setChecked(True)
-        elif current_lang == "en-US": lang_en_btn.setChecked(True)
+        if current_lang == "zh-CN":
+            lang_zh_CN_btn.setChecked(True)
+        elif current_lang == "zh-TW":
+            lang_zh_TW_btn.setChecked(True)
+        elif current_lang == "en-US":
+            lang_en_btn.setChecked(True)
 
         lang_zh_CN_btn.clicked.connect(switch_language)
         lang_zh_TW_btn.clicked.connect(switch_language)
@@ -169,6 +180,7 @@ class MomoReplyGUI(QWidget):
 
         trigger_sender_input = QLineEdit()
         trigger_sender_input.setText(settings_config.get("trigger_sender", "momo"))
+        # 优化：改用 editingFinished，避免输入时频繁读写文件
         trigger_sender_input.editingFinished.connect(
             lambda: self.config["settings"].update({"trigger_sender": trigger_sender_input.text()}) or self.save_config()
         )
@@ -176,6 +188,7 @@ class MomoReplyGUI(QWidget):
 
         trigger_keywords_input = QLineEdit()
         trigger_keywords_input.setText(settings_config.get("trigger_keywords", "!,！"))
+        # 优化：改用 editingFinished
         trigger_keywords_input.editingFinished.connect(
             lambda: self.config["settings"].update({"trigger_keywords": trigger_keywords_input.text()}) or self.save_config()
         )
@@ -184,12 +197,11 @@ class MomoReplyGUI(QWidget):
         default_folder = os.path.join(os.path.expanduser("~"), "Desktop", "素材")
         material_folder_input = QLineEdit()
         material_folder_input.setText(settings_config.get("material_folder", default_folder))
-        
+        # 优化：改用 editingFinished，同时更新图片数量
         def on_material_folder_edited():
             self.config["settings"]["material_folder"] = material_folder_input.text()
             self.save_config()
             update_image_count()
-            
         material_folder_input.editingFinished.connect(on_material_folder_edited)
         
         material_folder_btn = QPushButton("浏览...")
@@ -209,7 +221,10 @@ class MomoReplyGUI(QWidget):
         self.delay_spin.setValue(settings_config.get("send_delay", 0))
         self.delay_spin.setSingleStep(0.5)
         self.delay_spin.setDecimals(1)
-        self.delay_spin.valueChanged.connect(lambda v: self.config["settings"].update({"send_delay": v}) or self.save_config())
+        def update_delay():
+            self.config["settings"]["send_delay"] = self.delay_spin.value()
+            self.save_config()
+        self.delay_spin.valueChanged.connect(update_delay)
         form_layout.addRow(delay_label, self.delay_spin)
         
         random_label = QLabel("随机浮动范围（分钟）:")
@@ -218,27 +233,28 @@ class MomoReplyGUI(QWidget):
         self.random_delay_spin.setValue(settings_config.get("random_delay", 0))
         self.random_delay_spin.setSingleStep(0.5)
         self.random_delay_spin.setDecimals(1)
-        self.random_delay_spin.valueChanged.connect(lambda v: self.config["settings"].update({"random_delay": v}) or self.save_config())
+        def update_random_delay():
+            self.config["settings"]["random_delay"] = self.random_delay_spin.value()
+            self.save_config()
+        self.random_delay_spin.valueChanged.connect(update_random_delay)
         form_layout.addRow(random_label, self.random_delay_spin)
         random_hint = QLabel("提示：最终延迟 = 基础延迟 ± (浮动范围/2)，总宽度为你输入的浮动值，随机取值")
         random_hint.setStyleSheet("color:gray; font-size: 10px")
         form_layout.addRow("", random_hint)
         
         form_layout.addRow(QLabel("------------------------"))
-        
-        # 【修改点1】：将界面文案修改为泛用型的“触发关键词”
-        self.trigger_mode_exact = QRadioButton("完全匹配单独的触发关键词")
-        self.trigger_mode_contains = QRadioButton("只要包含触发关键词就触发")
-        
+        self.trigger_mode_exact = QRadioButton("只匹配单独感叹号（例如 \"!\" 或 \"！\"）")
+        self.trigger_mode_contains = QRadioButton("只要包含感叹号就触发")
         if settings_config.get("trigger_mode", "exact") == "exact":
             self.trigger_mode_exact.setChecked(True)
         else:
             self.trigger_mode_contains.setChecked(True)
-            
         def update_trigger_mode():
-            self.config["settings"]["trigger_mode"] = "exact" if self.trigger_mode_exact.isChecked() else "contains"
+            if self.trigger_mode_exact.isChecked():
+                self.config["settings"]["trigger_mode"] = "exact"
+            else:
+                self.config["settings"]["trigger_mode"] = "contains"
             self.save_config()
-            
         self.trigger_mode_exact.clicked.connect(update_trigger_mode)
         self.trigger_mode_contains.clicked.connect(update_trigger_mode)
         form_layout.addRow("", self.trigger_mode_exact)
@@ -254,11 +270,10 @@ class MomoReplyGUI(QWidget):
         self.start_minute = QSpinBox()
         self.start_minute.setRange(0, 59)
         self.start_minute.setValue(settings_config.get("auto_start_minute", 0))
-        
         def update_start_time():
-            self.config["settings"].update({"auto_start_hour": self.start_hour.value(), "auto_start_minute": self.start_minute.value()})
+            self.config["settings"]["auto_start_hour"] = self.start_hour.value()
+            self.config["settings"]["auto_start_minute"] = self.start_minute.value()
             self.save_config()
-            
         self.start_hour.valueChanged.connect(update_start_time)
         self.start_minute.valueChanged.connect(update_start_time)
         start_hbox.addWidget(QLabel("每日开始:"))
@@ -275,11 +290,10 @@ class MomoReplyGUI(QWidget):
         self.end_minute = QSpinBox()
         self.end_minute.setRange(0, 59)
         self.end_minute.setValue(settings_config.get("auto_end_minute", 0))
-        
         def update_end_time():
-            self.config["settings"].update({"auto_end_hour": self.end_hour.value(), "auto_end_minute": self.end_minute.value()})
+            self.config["settings"]["auto_end_hour"] = self.end_hour.value()
+            self.config["settings"]["auto_end_minute"] = self.end_minute.value()
             self.save_config()
-            
         self.end_hour.valueChanged.connect(update_end_time)
         self.end_minute.valueChanged.connect(update_end_time)
         end_hbox.addWidget(QLabel("每日结束:"))
@@ -291,15 +305,13 @@ class MomoReplyGUI(QWidget):
         
         self.enable_auto_timer = QCheckBox("启用每日定时自动启停")
         self.enable_auto_timer.setChecked(settings_config.get("enable_auto_timer", False))
-        
         def toggle_auto_timer(state):
             self.config["settings"]["enable_auto_timer"] = (state == Qt.Checked)
             self.save_config()
-            if state == Qt.Checked:
+            if (state == Qt.Checked):
                 self.start_auto_timer_check()
             else:
                 self.stop_auto_timer_check()
-                
         self.enable_auto_timer.stateChanged.connect(toggle_auto_timer)
         form_layout.addRow("", self.enable_auto_timer)
 
@@ -321,6 +333,7 @@ class MomoReplyGUI(QWidget):
         current_time = time.strftime("%H:%M:%S")
         self.log_view.addItem(f"[{current_time}] {message}")
         self.log_view.scrollToBottom()
+        # 优化：保留更多日志记录（由100提升至200）
         if self.log_view.count() > 200:
             self.log_view.takeItem(0)
 
@@ -332,6 +345,7 @@ class MomoReplyGUI(QWidget):
         trigger_mode = settings_config.get("trigger_mode", "exact")
         
         keywords = [k.strip() for k in trigger_keywords.split(',') if k.strip()]
+        
         triggered = False
         clean_text = str(last_text).strip()
         
@@ -347,65 +361,68 @@ class MomoReplyGUI(QWidget):
         
         if triggered and not self.last_triggered:
             self.last_triggered = True
-            # 【修改点2】：将日志警告中的感叹号替换为泛用名称
-            self.add_log(f"🚨🚨🚨 【高危警报】检测到触发关键词！抓取内容: '{last_text}'")
+            self.add_log(f"🚨🚨🚨 【高危警报】检测到未回复的感叹号！")
+            self.add_log(f"底层抓取到的最后一条内容: '{last_text}'")
             
             base_delay = settings_config.get("send_delay", 0)
             random_range = settings_config.get("random_delay", 0)
             
             if base_delay > 0 or random_range > 0:
                 half_range = random_range / 2
-                actual_delay = max(0, random.uniform(base_delay - half_range, base_delay + half_range) if random_range > 0 else base_delay)
-                self.add_log(f"⏳ 将在 {actual_delay:.1f} 分钟后发送图片...")
+                if random_range > 0:
+                    actual_delay = random.uniform(base_delay - half_range, base_delay + half_range)
+                    actual_delay = max(0, actual_delay)
+                    self.add_log(f"⏳ 基础延迟 {base_delay} 分钟，总波动范围 {random_range} 分钟 (±{half_range})，实际延迟 {actual_delay:.1f} 分钟后发送图片...")
+                else:
+                    actual_delay = base_delay
+                    self.add_log(f"⏳ 将在 {actual_delay:.1f} 分钟后发送图片...")
+                
                 delay_seconds = int(actual_delay * 60)
                 
+                # 优化：修复延迟发送时中途关闭监控仍然会发送的 bug
                 def delayed_send():
                     wait_time = delay_seconds
                     while wait_time > 0:
-                        if not getattr(self, 'monitoring', False):
+                        if not self.monitoring:
                             self.add_log("⏹️ 监控已停止，取消本次延迟发送计划")
                             self.last_triggered = False
                             return
                         time.sleep(1)
                         wait_time -= 1
                         
-                    if getattr(self, 'monitoring', False):
+                    # 循环结束，二次确认是否仍在监控
+                    if self.monitoring:
                         self._do_send_image(trigger_sender, material_folder, current_time)
                         
-                threading.Thread(target=delayed_send, daemon=True).start()
+                thread = threading.Thread(target=delayed_send, daemon=True)
+                thread.start()
             else:
                 self._do_send_image(trigger_sender, material_folder, current_time)
                 
         elif not triggered and self.last_triggered:
             self.last_triggered = False
-            self.add_log(f"✅ 警报解除：最后一条消息变成了: '{last_text}'")
+            self.add_log(f"✅ 警报解除：最后一条消息变成了: '{last_text}'，说明已回复或对方撤回/发了新话。")
     
     def _do_send_image(self, trigger_sender, material_folder, trigger_time):
-        if not self.monitoring:
-            return
-            
-        self.add_log(f"📡 开始执行发送...")
+        current_time = time.strftime("%H:%M:%S")
+        self.add_log(f"📡 [{current_time}] 开始执行发送...")
+        
+        # 优化：调用封装好的公共方法
         images = self.get_valid_images(material_folder)
         
-        if not images:
-            self.add_log("❌ 素材文件夹中没有图片，无法发送")
+        if len(images) == 0:
+            self.add_log("❌ 素材文件夹中没有找到图片，无法发送")
             self.last_triggered = False
             return
         
         selected_image = random.choice(images)
-        self.add_log(f"🎲 选择图片: {os.path.basename(selected_image)}")
+        self.add_log(f"🎲 随机选择了图片: {os.path.basename(selected_image)} (共 {len(images)} 张图片)")
         
         try:
             self.wechat.send_file(trigger_sender, selected_image, search_user=False)
-            self.add_log(f"📤 图片操作发送完毕")
-            
-            time.sleep(1.0) 
-            try:
-                os.remove(selected_image)
-                self.add_log(f"🗑️ 已删除图片: {os.path.basename(selected_image)}")
-            except PermissionError:
-                self.add_log(f"⚠️ 警告: 图片正被微信占用，未能删除，请稍后手动清理。")
-                
+            self.add_log(f"📤 图片发送成功")
+            os.remove(selected_image)
+            self.add_log(f"🗑️ 已删除发送的图片: {os.path.basename(selected_image)}")
         except Exception as e:
             self.add_log(f"❌ 发送失败: {str(e)}")
         finally:
@@ -413,73 +430,105 @@ class MomoReplyGUI(QWidget):
 
     def start_monitoring(self):
         if self.monitoring:
+            QMessageBox.information(self, "提示", "监控已经在运行中！")
             return
-            
+        
         material_folder = self.config.get("settings", {}).get("material_folder", "")
-        if not os.path.exists(material_folder) or not self.get_valid_images(material_folder):
-            QMessageBox.warning(self, "错误", "素材文件夹不存在或为空，请准备好图片！")
+        if not os.path.exists(material_folder):
+            QMessageBox.warning(self, "错误", "素材文件夹不存在，请先设置正确的路径！")
             return
         
-        self.monitoring = True
-        self.last_triggered = False
-        self.monitor_start_time = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.add_log(f"🚀 [{self.monitor_start_time}] 启动精准监控")
+        # 优化：调用封装好的公共方法
+        images = self.get_valid_images(material_folder)
         
+        if len(images) == 0:
+            QMessageBox.warning(self, "提示", "素材文件夹中没有图片文件，发送触发后将无法发送图片！")
+        
+        start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.add_log(f"🚀 [{start_time}] 启动精准控件树监控")
+        
+        self.last_triggered = False
         self.wechat.start_last_message_monitor(callback=self.on_last_message_change, check_interval=1)
+        self.monitoring = True
+        self.monitor_start_time = start_time
         
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.start_btn.setStyleSheet("color:gray; padding: 10px;")
-        self.stop_btn.setStyleSheet("color:red; font-size: 14px; padding: 10px;")
+        self.start_btn.setStyleSheet("color:gray")
+        self.stop_btn.setStyleSheet("color:red")
+        
+        delay = self.config.get("settings", {}).get("send_delay", 0)
+        delay_info = f"\n• 检测到触发后延迟 {delay} 分钟发送" if delay > 0 else ""
+        
+        QMessageBox.information(self, "监控已启动", 
+            "精准消息监控已启动！\n\n"
+            "请确保：\n"
+            "• 微信已经打开\n"
+            "• momo的聊天窗口处于打开状态\n"
+            "• 程序会持续监控聊天窗口最后一条消息\n"
+            "• 当最后一条消息包含感叹号时，自动回复随机图片\n"
+            "• 图片发送后会自动删除，避免重复发送"
+            f"{delay_info}")
 
     def stop_monitoring(self):
         if self.monitoring:
-            self.monitoring = False
             self.wechat.stop_last_message_monitor()
-            self.add_log(f"⏹️ [{time.strftime('%Y-%m-%d %H:%M:%S')}] 监控已停止")
-            
+            stop_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            start_time = getattr(self, 'monitor_start_time', 'unknown')
+            self.add_log(f"⏹️ [{stop_time}] 消息监控已停止 (开始时间: {start_time})")
+            self.monitoring = False
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
-            self.start_btn.setStyleSheet("color:green; font-size: 14px; padding: 10px;")
-            self.stop_btn.setStyleSheet("color:gray; padding: 10px;")
+            self.start_btn.setStyleSheet("color:green")
+            self.stop_btn.setStyleSheet("color:gray")
     
     def start_auto_timer_check(self):
         if self.auto_timer is None:
             self.auto_timer = QTimer(self)
             self.auto_timer.timeout.connect(self.auto_check_time)
             self.auto_timer.start(60000)
-            self.add_log("⏰ 定时自动启停检查已开启")
+            self.add_log("⏰ 自动定时检查已启动，将每日自动启停监控")
     
     def stop_auto_timer_check(self):
         if self.auto_timer is not None:
             self.auto_timer.stop()
             self.auto_timer = None
-            self.add_log("⏹️ 定时自动启停检查已关闭")
+            self.add_log("⏹️ 自动定时检查已停止")
     
     def auto_check_time(self):
         now = datetime.datetime.now()
-        settings = self.config.get("settings", {})
+        settings_config = self.config.get("settings", {})
+        start_h = settings_config.get("auto_start_hour", 10)
+        start_m = settings_config.get("auto_start_minute", 0)
+        end_h = settings_config.get("auto_end_hour", 12)
+        end_m = settings_config.get("auto_end_minute", 0)
         
         current_total = now.hour * 60 + now.minute
-        start_total = settings.get("auto_start_hour", 10) * 60 + settings.get("auto_start_minute", 0)
-        end_total = settings.get("auto_end_hour", 12) * 60 + settings.get("auto_end_minute", 0)
+        start_total = start_h * 60 + start_m
+        end_total = end_h * 60 + end_m
         
         should_be_monitoring = start_total <= current_total < end_total
         
         if should_be_monitoring and not self.monitoring:
-            self.add_log("🤖 到达设定时间，自动启动")
+            self.add_log(f"🤖 到达设定开始时间 {start_h}:{start_m:02d}，自动启动监控")
             self.start_monitoring()
         elif not should_be_monitoring and self.monitoring:
-            self.add_log("🤖 到达设定时间，自动停止")
+            self.add_log(f"🤖 到达设定结束时间 {end_h}:{end_m:02d}，自动停止监控")
             self.stop_monitoring()
 
     def initUI(self):
         vbox = QVBoxLayout()
 
         self.wechat_notice_btn = QPushButton("使用说明", self)
+        self.wechat_notice_btn.resize(self.wechat_notice_btn.sizeHint())
         self.wechat_notice_btn.clicked.connect(self.show_wechat_open_notice)
 
+        lang = self.init_language_choose()
+        settings = self.init_settings()
+        monitor_log = self.init_monitor_log()
+
         hbox_controls = QHBoxLayout()
+        
         self.start_btn = QPushButton("开始监控")
         self.start_btn.setStyleSheet("color:green; font-size: 14px; padding: 10px;")
         self.start_btn.clicked.connect(self.start_monitoring)
@@ -493,16 +542,19 @@ class MomoReplyGUI(QWidget):
         hbox_controls.addWidget(self.stop_btn)
 
         vbox.addWidget(self.wechat_notice_btn)
-        vbox.addLayout(self.init_language_choose())
-        vbox.addLayout(self.init_settings())
-        vbox.addLayout(self.init_monitor_log())
+        vbox.addLayout(lang)
+        vbox.addLayout(settings)
+        vbox.addLayout(monitor_log)
         vbox.addLayout(hbox_controls)
 
+        desktop = QApplication.desktop()
+        screenRect = desktop.screenGeometry()
+        height = screenRect.height()
+        width = screenRect.width()
+
         self.setLayout(vbox)
-        
-        screen_rect = QApplication.primaryScreen().geometry()
-        self.setFixedSize(int(screen_rect.width() * 0.5), int(screen_rect.height() * 0.7))
-        self.setWindowTitle('Momo自动回复 - 专属定制版')
+        self.setFixedSize(int(width*0.5), int(height*0.7))
+        self.setWindowTitle('Momo自动回复 - 感叹号随机发图')
         self.show()
 
 

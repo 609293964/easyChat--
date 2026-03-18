@@ -14,7 +14,7 @@ def main():
     
     exclude_args = ' '.join([f'--exclude-module={mod}' for mod in excludes])
     
-    cmd = f"pyinstaller.exe -Fw {exclude_args} wechat_gui_momo.py"
+    cmd = f"pyinstaller.exe -Fw {exclude_args} wechat_gui.py"
 
     print(f"执行打包命令: {cmd}")
     # 执行命令并打印输出
