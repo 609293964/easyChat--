@@ -24,14 +24,6 @@ def setClipboardFiles(paths):
 		win32clipboard.CloseClipboard()
 
 
-def readClipboardFilePaths():
-	win32clipboard.OpenClipboard()
-	try:
-		return win32clipboard.GetClipboardData(win32clipboard.CF_HDROP)
-	finally:
-		win32clipboard.CloseClipboard()
-
-
 pDropFiles = DROPFILES()
 pDropFiles.pFiles = sizeof(DROPFILES)
 pDropFiles.fWide = True

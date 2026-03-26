@@ -5,6 +5,7 @@ import random
 import json
 import datetime
 import threading
+import uiautomation as auto
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
@@ -447,7 +448,11 @@ class MomoReplyGUI(QWidget):
                         self._do_send_action(trigger_sender, rule_idx)
                     ctypes.windll.ole32.CoUninitialize()
                         
-                threading.Thread(target=delayed_send, args=(matched_rule_idx,), daemon=True).start()
+                threading.Thread(
+                    target=self._delayed_send_action,
+                    args=(delay_seconds, trigger_sender, matched_rule_idx),
+                    daemon=True
+                ).start()
             else:
                 self._do_send_action(trigger_sender, matched_rule_idx)
                 
@@ -496,6 +501,70 @@ class MomoReplyGUI(QWidget):
                 
         except Exception as e:
             self.add_log(f"❌ 发送异常: {str(e)}")
+        finally:
+            self.last_triggered = False
+
+    def _delayed_send_action(self, delay_seconds, trigger_sender, rule_idx):
+        _uia_init = auto.UIAutomationInitializerInThread()
+        try:
+            wait_time = delay_seconds
+            while wait_time > 0:
+                if not self.monitoring:
+                    self.add_log("监控已停止，取消延时发送")
+                    self.last_triggered = False
+                    return
+                time.sleep(1)
+                wait_time -= 1
+
+            if self.monitoring:
+                self._do_send_action(trigger_sender, rule_idx)
+        finally:
+            _uia_init = None
+
+    def _do_send_action(self, trigger_sender, rule_idx):
+        rule = self.config["rules"][rule_idx]
+        reply_type = rule.get("reply_type", "image")
+
+        self.add_log("开始执行发送动作")
+
+        try:
+            if reply_type == "image":
+                material_folder = rule.get("folder", "")
+                images = self.get_valid_images(material_folder)
+
+                if len(images) == 0:
+                    self.add_log("指定素材文件夹中没有图片可发")
+                    return
+
+                selected_image = random.choice(images)
+                self.add_log(f"已抽取图片: {os.path.basename(selected_image)}")
+
+                sent = self.wechat.send_file(trigger_sender, selected_image, search_user=False)
+                if not sent:
+                    self.add_log("图片发送动作未成功执行，已保留源文件")
+                    return
+
+                self.add_log("图片发送动作已执行")
+                os.remove(selected_image)
+                self.add_log(f"已删除源文件: {os.path.basename(selected_image)}")
+                self.update_img_count_signal.emit(rule_idx)
+
+            elif reply_type == "text":
+                reply_text = rule.get("reply_text", "")
+                if not reply_text:
+                    self.add_log("规则未配置回复文本，无法发送")
+                    return
+
+                self.add_log("准备发送文本")
+                sent = self.wechat.send_msg(trigger_sender, text=reply_text, search_user=False)
+                if not sent:
+                    self.add_log("文本发送动作未成功执行")
+                    return
+
+                self.add_log("文本发送动作已执行")
+
+        except Exception as e:
+            self.add_log(f"发送异常: {str(e)}")
         finally:
             self.last_triggered = False
 

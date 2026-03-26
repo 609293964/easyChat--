@@ -15,7 +15,6 @@ from wechat_locale import WeChatLocale
 
 class WechatGUI(QWidget):
     # 定义信号，用于将后台线程的UI更新操作切回主线程
-    new_message_signal = pyqtSignal(str)
     alert_message_signal = pyqtSignal(str)
 
     def __init__(self):
@@ -68,7 +67,6 @@ class WechatGUI(QWidget):
         self.contacts = []
 
         # 连接跨线程UI更新信号
-        self.new_message_signal.connect(self._append_monitor_message)
         self.alert_message_signal.connect(self._append_monitor_message)
 
         # 初始化图形界面
@@ -135,28 +133,7 @@ class WechatGUI(QWidget):
             self.config["contacts"] = contacts
             self.save_config()
 
-        # 读取联系人列表并保存
-        def save_contacts():
-            # 先弹出一个提示词告诉用户这个提取并不保证可靠，因为微信组织信息的方式本身就有歧义
-            QMessageBox.information(self, "注意", "提取联系人列表功能并不保证完全可靠，因为微信组织信息的方式本身就有歧义。"
-                                                  "如果想要提取更可靠，请不需要在给用户的备注和设置的分组标签里面加空格。")
 
-            path = QFileDialog.getSaveFileName(self, "保存联系人列表", "contacts.csv", "表格文件(*.csv)")[0]
-            if not path == "":
-                contacts = self.wechat.find_all_contacts()
-                contacts.to_csv(path, index=False, encoding='utf_8_sig')
-                QMessageBox.information(self, "保存成功", "联系人列表保存成功！")
-
-        # 保存群聊列表
-        def save_groups():
-            path = QFileDialog.getSaveFileName(self, "保存群聊列表", "groups.txt", "文本文件(*.txt)")[0]
-            if not path == "":
-                contacts = self.wechat.find_all_groups()
-                with open(path, 'w', encoding='utf-8') as f:
-                    for contact in contacts:
-                        f.write(contact + '\n')
-
-                QMessageBox.information(self, "保存成功", "群聊列表保存成功！")
 
         # 读取联系人列表并加载
         def load_contacts():
@@ -215,12 +192,6 @@ class WechatGUI(QWidget):
         # 用户界面的按钮
         info = QLabel("待发送用户列表")
 
-        save_btn = QPushButton("保存微信好友列表")
-        save_btn.clicked.connect(save_contacts)
-
-        save_group_btn = QPushButton("保存微信群聊列表")
-        save_group_btn.clicked.connect(save_groups)
-
         load_btn = QPushButton("加载用户txt文件")
         load_btn.clicked.connect(load_contacts)
 
@@ -231,8 +202,6 @@ class WechatGUI(QWidget):
         del_btn.clicked.connect(del_contact)
 
         vbox.addWidget(info)
-        vbox.addWidget(save_btn)
-        vbox.addWidget(save_group_btn)
         vbox.addWidget(load_btn)
         vbox.addWidget(add_btn)
         vbox.addWidget(del_btn)
@@ -907,64 +876,14 @@ class WechatGUI(QWidget):
             vbox_right = QVBoxLayout(content_right)
             vbox_right.addStretch(1)
             
-            # ========== 普通消息监控 ==========
-            # 监控开关
-            self.monitor_btn = QPushButton("开始监控消息")
-            self.monitor_running = False
-            
-            # 槽函数：在主线程中添加监控消息
-            def _append_monitor_message(msg):
-                self.monitor_view.addItem(msg)
-                # 自动滚动到底部
-                self.monitor_view.scrollToBottom()
-                # 最多保存100条消息
-                if self.monitor_view.count() > 100:
-                    self.monitor_view.takeItem(0)
-
-            # 消息回调函数（在后台线程调用，通过信号切到主线程更新UI）
-            def on_new_message(sender, content, time, msg_type):
-                # 在监控列表中显示新消息
-                msg = f"[{time}] [{msg_type}] {sender}: {content}"
-                self.new_message_signal.emit(msg)
-            
-            def toggle_monitor():
-                if not self.monitor_running:
-                    # 开始监控
-                    self.wechat.set_message_callback(on_new_message)
-                    self.wechat.start_monitor(check_interval=2)
-                    self.monitor_running = True
-                    self.monitor_btn.setText("停止监控消息")
-                    self.monitor_btn.setStyleSheet("color:red")
-                    QMessageBox.information(self, "监控已启动", "微信消息监控已启动！\n\n提示：\n• 基于UIAutomation技术\n• 支持文本、图片、文件、语音识别\n• 微信窗口可以在后台运行")
-                else:
-                    # 停止监控
-                    self.wechat.stop_monitor()
-                    self.monitor_running = False
-                    self.monitor_btn.setText("开始监控消息")
-                    self.monitor_btn.setStyleSheet("color:black")
-                    QMessageBox.information(self, "监控已停止", "微信消息监控已停止！")
-            
-            self.monitor_btn.clicked.connect(toggle_monitor)
-            
+            # ========== 消息监控 ==========
             # 清空消息按钮
             clear_monitor_btn = QPushButton("清空消息列表")
             def clear_monitor():
                 self.monitor_view.clear()
             clear_monitor_btn.clicked.connect(clear_monitor)
             
-            # 获取聊天列表按钮
-            get_chat_list_btn = QPushButton("获取聊天列表")
-            def show_chat_list():
-                chat_list = self.wechat.get_chat_list()
-                if chat_list:
-                    QMessageBox.information(self, "聊天列表", "\n".join(chat_list[:20]) + ("\n..." if len(chat_list) > 20 else ""))
-                else:
-                    QMessageBox.warning(self, "获取失败", "未获取到聊天列表，请确保微信窗口已打开！")
-            get_chat_list_btn.clicked.connect(show_chat_list)
-            
-            vbox_right.addWidget(self.monitor_btn)
             vbox_right.addWidget(clear_monitor_btn)
-            vbox_right.addWidget(get_chat_list_btn)
             
             # ========== 精准最后一条消息监控（关键词警报） ==========
             # 添加分隔线
