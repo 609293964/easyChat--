@@ -54,8 +54,9 @@ class MomoReplyGUI(QWidget):
         )
         
         self.monitoring = False
-        self.monitor_thread = None
         self.last_triggered = False
+        self.trigger_state_lock = threading.Lock()
+        self.trigger_token = 0
         self.auto_timer = None
         self.rule_img_count_labels = {} # 用于存储各个规则的图片数量Label引用
 
@@ -393,45 +394,87 @@ class MomoReplyGUI(QWidget):
             imgs = self.get_valid_images(folder)
             self.rule_img_count_labels[rule_idx].setText(f"图片数量: {len(imgs)}")
 
-    def on_last_message_change(self, last_text, current_time):
+    def _try_activate_trigger(self):
+        with self.trigger_state_lock:
+            if self.last_triggered:
+                return None
+            self.trigger_token += 1
+            self.last_triggered = True
+            return self.trigger_token
+
+    def _clear_trigger_if_active(self):
+        with self.trigger_state_lock:
+            if not self.last_triggered:
+                return False
+            self.trigger_token += 1
+            self.last_triggered = False
+            return True
+
+    def _invalidate_trigger(self):
+        with self.trigger_state_lock:
+            self.trigger_token += 1
+            self.last_triggered = False
+
+    def _is_trigger_active(self, trigger_token):
+        with self.trigger_state_lock:
+            return self.last_triggered and self.trigger_token == trigger_token
+
+    def _finish_trigger(self, trigger_token):
+        with self.trigger_state_lock:
+            if self.trigger_token == trigger_token:
+                self.last_triggered = False
+
+    def _find_matching_rule_index(self, clean_text, active_count):
+        for i in range(active_count):
+            rule = self.config["rules"][i]
+            keywords = [k.strip() for k in rule.get("keywords", "").split(',') if k.strip()]
+            mode = rule.get("mode", "exact")
+
+            if mode == "exact":
+                if clean_text in keywords:
+                    return i
+            elif any(keyword in clean_text for keyword in keywords):
+                return i
+
+        return -1
+
+    def _get_delay_seconds(self, settings_config):
+        base_delay = settings_config.get("send_delay", 0)
+        random_range = settings_config.get("random_delay", 0)
+
+        if base_delay <= 0 and random_range <= 0:
+            return 0, 0
+
+        if random_range > 0:
+            half_range = random_range / 2
+            actual_delay = max(0, random.uniform(base_delay - half_range, base_delay + half_range))
+        else:
+            actual_delay = max(0, base_delay)
+
+        return int(actual_delay * 60), actual_delay
+
+    def on_last_message_change(self, last_text, _current_time):
         settings_config = self.config.get("settings", {})
         trigger_sender = settings_config.get("trigger_sender", "momo")
         active_count = settings_config.get("active_rules_count", 1)
         
         clean_text = str(last_text).strip()
-        matched_rule_idx = -1
+        matched_rule_idx = self._find_matching_rule_index(clean_text, active_count)
         
-        for i in range(active_count):
-            rule = self.config["rules"][i]
-            keywords = [k.strip() for k in rule.get("keywords", "").split(',') if k.strip()]
-            mode = rule.get("mode", "exact")
-            
-            for keyword in keywords:
-                if mode == "exact" and clean_text == keyword:
-                    matched_rule_idx = i
-                    break
-                elif mode == "contains" and keyword in clean_text:
-                    matched_rule_idx = i
-                    break
-            if matched_rule_idx != -1:
-                break
-        
-        if matched_rule_idx != -1 and not self.last_triggered:
-            self.last_triggered = True
+        if matched_rule_idx != -1:
+            trigger_token = self._try_activate_trigger()
+            if trigger_token is None:
+                return
             
             self.add_log(f"🚨 【警报触发】命中规则 {matched_rule_idx+1}，内容: '{last_text}'")
             
-            base_delay = settings_config.get("send_delay", 0)
-            random_range = settings_config.get("random_delay", 0)
+            delay_seconds, actual_delay = self._get_delay_seconds(settings_config)
             
-            if base_delay > 0 or random_range > 0:
-                half_range = random_range / 2
-                actual_delay = max(0, random.uniform(base_delay - half_range, base_delay + half_range) if random_range > 0 else base_delay)
+            if delay_seconds > 0:
                 self.add_log(f"⏳ 延迟 {actual_delay:.1f} 分钟后开始发送...")
-                delay_seconds = int(actual_delay * 60)
                 
                 # 传入命中的 rule_idx
-                def delayed_send(rule_idx):
+                def _legacy_delayed_send_unused(rule_idx):
                     import ctypes
                     ctypes.windll.ole32.CoInitialize(None)
                     wait_time = delay_seconds
@@ -450,18 +493,22 @@ class MomoReplyGUI(QWidget):
                         
                 threading.Thread(
                     target=self._delayed_send_action,
-                    args=(delay_seconds, trigger_sender, matched_rule_idx),
+                    args=(delay_seconds, trigger_sender, matched_rule_idx, trigger_token),
                     daemon=True
                 ).start()
             else:
-                self._do_send_action(trigger_sender, matched_rule_idx)
+                self._do_send_action(trigger_sender, matched_rule_idx, trigger_token)
                 
-        elif matched_rule_idx == -1 and self.last_triggered:
-            self.last_triggered = False
+        elif self._clear_trigger_if_active():
             self.add_log(f"✅ 警报解除：最后一条消息变成了: '{last_text}'。")
     
     # [重构] 包含图片和文本的处理中心
-    def _do_send_action(self, trigger_sender, rule_idx):
+    # Legacy implementation kept for reference; actual sends use _do_send_action below.
+    def _do_send_action_legacy(self, trigger_sender, rule_idx, trigger_token):
+        if not self._is_trigger_active(trigger_token):
+            self.add_log("当前触发已失效，跳过发送")
+            return
+
         rule = self.config["rules"][rule_idx]
         reply_type = rule.get("reply_type", "image")
         
@@ -502,26 +549,35 @@ class MomoReplyGUI(QWidget):
         except Exception as e:
             self.add_log(f"❌ 发送异常: {str(e)}")
         finally:
-            self.last_triggered = False
+            self._finish_trigger(trigger_token)
 
-    def _delayed_send_action(self, delay_seconds, trigger_sender, rule_idx):
+    def _delayed_send_action(self, delay_seconds, trigger_sender, rule_idx, trigger_token):
         _uia_init = auto.UIAutomationInitializerInThread()
         try:
             wait_time = delay_seconds
             while wait_time > 0:
                 if not self.monitoring:
                     self.add_log("监控已停止，取消延时发送")
-                    self.last_triggered = False
+                    self._finish_trigger(trigger_token)
+                    return
+                if not self._is_trigger_active(trigger_token):
+                    self.add_log("警报已解除，取消本次延时发送")
                     return
                 time.sleep(1)
                 wait_time -= 1
 
-            if self.monitoring:
-                self._do_send_action(trigger_sender, rule_idx)
+            if self.monitoring and self._is_trigger_active(trigger_token):
+                self._do_send_action(trigger_sender, rule_idx, trigger_token)
+            elif self.monitoring:
+                self.add_log("警报已解除，取消本次延时发送")
         finally:
             _uia_init = None
 
-    def _do_send_action(self, trigger_sender, rule_idx):
+    def _do_send_action(self, trigger_sender, rule_idx, trigger_token):
+        if not self._is_trigger_active(trigger_token):
+            self.add_log("当前触发已失效，跳过发送")
+            return
+
         rule = self.config["rules"][rule_idx]
         reply_type = rule.get("reply_type", "image")
 
@@ -566,7 +622,7 @@ class MomoReplyGUI(QWidget):
         except Exception as e:
             self.add_log(f"发送异常: {str(e)}")
         finally:
-            self.last_triggered = False
+            self._finish_trigger(trigger_token)
 
     def start_monitoring(self):
         if self.monitoring:
@@ -576,7 +632,7 @@ class MomoReplyGUI(QWidget):
         start_time = time.strftime("%Y-%m-%d %H:%M:%S")
         self.add_log(f"🚀 [{start_time}] 启动精准多重规则监控")
         
-        self.last_triggered = False
+        self._invalidate_trigger()
         trigger_sender = self.config.get("settings", {}).get("trigger_sender", "momo")
         self.wechat.start_last_message_monitor(target_name=trigger_sender, callback=self.on_last_message_change, check_interval=1)
         
@@ -589,6 +645,7 @@ class MomoReplyGUI(QWidget):
     def stop_monitoring(self):
         if self.monitoring:
             self.wechat.stop_last_message_monitor()
+            self._invalidate_trigger()
             self.add_log(f"⏹️ 消息监控已手动停止")
             self.monitoring = False
             self.start_btn.setEnabled(True)

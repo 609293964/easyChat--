@@ -4,157 +4,95 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-EasyChat is a PC WeChat automation assistant that uses UI automation to control the WeChat desktop client. It provides scheduled messaging, bulk messaging, and auto-reply functionality through a PyQt5 GUI. The project uses `uiautomation` to interact with WeChat's UI controls since web WeChat is no longer available.
+EasyChat Momo is a PC WeChat automation assistant focused on keyword-triggered auto-replies. It uses `uiautomation` to watch an independent WeChat chat window and send an image or text reply after an optional delay.
 
-**Important**: This project currently supports WeChat version 4.1. Some features (like `check_new_msg`, `get_dialogs`, `save_dialog_pictures`) are marked as `NotImplementedError` and have not been adapted to the new WeChat version.
+Important notes:
+- The maintained GUI entry is `wechat_gui_momo.py`.
+- Configuration is stored in `wechat_config_momo.json`.
+- The project targets WeChat 4.1 desktop UI behavior.
 
 ## Prerequisites
 
-**CRITICAL**: Windows Narrator mode (讲述人) must be enabled for `uiautomation` to work properly. Without it, the application cannot detect WeChat UI controls. This is the #1 cause of runtime failures.
+**CRITICAL**: Windows Narrator mode must be enabled for `uiautomation` to correctly detect WeChat controls. This is the most common cause of runtime failures.
 
 ## Key Dependencies
 
-Core dependencies (from requirements.txt, which has UTF-16 encoding):
-- **PyQt5 5.15.7** - GUI framework
-- **uiautomation 2.0.17** - Windows UI automation library
-- **pyperclip 1.8.2** - Clipboard operations for text
-- **keyboard 0.13.5** - Global hotkey handling (Ctrl+Alt+Q to interrupt)
-- **pyautogui 0.9.54** - Additional automation utilities
-- **pandas 2.0.3** - Data handling for contact lists
-- **pyinstaller 5.12.0** - Executable packaging
-- **pywin32 304** - Windows API access
+Core dependencies from `requirements.txt`:
+- `PyQt5 5.15.7`
+- `uiautomation 2.0.17`
+- `pyperclip 1.8.2`
+- `keyboard 0.13.5`
+- `pyautogui 0.9.54`
+- `pyinstaller 5.12.0`
+- `pywin32 304`
 
 ## Architecture
 
 ### Core Components
 
-1. **ui_auto_wechat.py** - Core WeChat automation logic
-   - `WeChat` class: Main automation controller that uses `uiautomation` to find and interact with WeChat UI controls
-   - Handles contact search, message sending, file sending, contact extraction, and group extraction
-   - Uses clipboard operations (`pyperclip`, `setClipboardFiles`) for text and file transfers
-   - Supports multi-language WeChat clients (zh-CN, zh-TW, en-US) via `WeChatLocale`
+1. `wechat_gui_momo.py`
+   - Main PyQt5 GUI and current application entry.
+   - Manages rules, delay settings, timed monitoring windows, logging, and config persistence.
+   - Cancels delayed sends when a later message clears the alert state.
 
-2. **wechat_gui.py** - PyQt5 GUI application
-   - `WechatGUI` class: Main window that orchestrates all UI components
-   - Manages configuration persistence via `wechat_config.json` (auto-saves user actions)
-   - Integrates with `ClockThread` for scheduled messaging
-   - Uses global hotkey (Ctrl+Alt) to interrupt sending operations
+2. `ui_auto_wechat.py`
+   - Core WeChat automation layer.
+   - Finds chat windows, monitors the latest message, sends text, and sends files.
 
-3. **wechat_locale.py** - Internationalization support
-   - `WeChatLocale` class: Provides localized UI element names for different WeChat language versions
-   - Critical for finding UI controls in different language environments
+3. `wechat_locale.py`
+   - Localized control names for different WeChat language settings.
 
-4. **module.py** - Custom PyQt5 widgets
-   - Reusable UI components like `MyListWidget`, `MySpinBox`, `ClockThread`, etc.
+4. `clipboard.py`
+   - File clipboard helper used by the automation layer.
 
-5. **clipboard.py** - File clipboard operations
-   - `setClipboardFiles()`: Copies files to clipboard for sending via Ctrl+V
-
-6. **automation.py** - UI control tree visualization tool
-   - Helper for developers to inspect WeChat's UI control hierarchy
+5. `tools/automation.py`
+   - Helper for inspecting the WeChat control tree when UI changes break automation.
 
 ## Development Commands
 
 ### Setup
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Running the Application
+### Run the application
+
 ```bash
-python wechat_gui.py
+py wechat_gui_momo.py
 ```
 
-### Building Executable
+### Build the executable
+
 ```bash
-python pack.py
+py pack.py
 ```
-This uses PyInstaller to create a standalone `.exe` file. The actual command is:
+
+This uses `wechat_gui_momo.spec` and outputs `dist/wechat_gui_momo.exe`.
+
+### Build the portable zip package
+
 ```bash
-pyinstaller.exe -Fw wechat_gui.py
-```
-Output: `dist/wechat_gui.exe`
-
-### Testing Core Functions
-Run the `__main__` section in `ui_auto_wechat.py` with your WeChat path:
-```python
-path = "D:\Program Files (x86)\Weixin\Weixin.exe"
-wechat = WeChat(path, locale="zh-CN")
-# Uncomment specific test functions
+py pack.py --portable
 ```
 
-## Key Technical Details
+This creates `wechat_gui_momo_portable.zip`.
 
-### User Interaction Features
-- **Interrupt Hotkey**: Users can press `Ctrl+Alt+Q` to terminate sending operations mid-process (handled by `keyboard` library global hook in `wechat_gui.py`)
-- **Anti-Auto-Logout**: Optional feature to prevent WeChat from automatically logging out during long idle periods (triggers every hour)
-- **Multi-File Selection**: File upload dialogs support selecting multiple files simultaneously
+## Configuration Notes
 
-### UI Automation Strategy
-- Uses `uiautomation` library to locate WeChat controls by `Depth`, `Name`, `ClassName`, and `foundIndex`
-- Control depths are hardcoded (e.g., `Depth=13` for search box) and may break with WeChat UI updates
-- Search strategy: Types contact name in search box, waits 0.3s, then clicks first non-"XTableCell" result
-- Message sending: Uses clipboard paste (`Ctrl+V`) instead of direct text input for reliability
+`wechat_config_momo.json` stores:
+- `settings`: WeChat path, language, target sender, active rule count, delay settings, and auto-timer options
+- `rules`: up to 5 keyword rules, each with reply type, folder or text content, and match mode
 
-### Configuration Management
-- **Auto-Save**: All user settings stored in `wechat_config.json` with automatic persistence after EVERY user action (add/delete contacts, messages, schedules). No manual save required.
-- Configuration structure:
-  ```json
-  {
-    "settings": {"wechat_path": "", "send_interval": 0, "system_version": "new", "language": "zh-CN"},
-    "contacts": [],
-    "messages": [],
-    "schedules": []
-  }
-  ```
-- Config is loaded automatically on startup and saved after each modification in GUI
-
-### Message Format in GUI
-Messages are stored as colon-separated strings:
-- Text: `{rank}:text:{to}:{at_names}:{content}`
-- File: `{rank}:file:{to}:{path}`
-- `to` can be "all" or comma-separated user indices like "1,2,3"
-- Content supports `\n` for newlines (e.g., "Hello\nWorld" sends as two lines)
-
-### Bulk Loading from TXT Files
-- **Users TXT**: One contact name per line, loaded via "加载用户txt文件" button
-- **Content TXT**: Format `all:content` or `1,2,3:content` per line (colon-separated: recipient list, then message)
-- TXT loading only supports text messages, not file attachments
-
-### Scheduled Messaging
-- `ClockThread` in `module.py` checks time every second
-- Schedule format: `{year} {month} {day} {hour} {min} {start}-{end}`
-- `start-end` specifies which messages to send (by index)
-
-### Contact Extraction Limitations
-The `find_all_contacts()` method has known reliability issues:
-- WeChat's UI organizes contact info ambiguously (nickname, note, label separated by spaces)
-- Uses `rsplit(" ", maxsplit=2)` which fails if names/notes contain spaces
-- Scrolls through contact list with retry logic (3 failed attempts before stopping)
+Rule behavior:
+- Match mode supports exact match and contains match.
+- Delayed replies are invalidated if a later message no longer matches a keyword.
+- Image replies remove the sent image from the source folder after a successful send.
 
 ## Common Pitfalls
 
-1. **WeChat Version Compatibility**: Hardcoded control depths break when WeChat updates its UI. Use `automation.py` to inspect the new control tree. Latest supported version: 4.1 (as of 2026/03/09).
-
-2. **WeChat Launch Method**: Recent versions (2026/03/09 fix) use a new launch method to avoid triggering new login popup. Don't modify WeChat startup logic without understanding the workaround.
-
-3. **Search Box Behavior**: Groups no longer appear as first search result. Code now skips "XTableCell" items to find actual contacts (line 116 in ui_auto_wechat.py).
-
-4. **Clipboard Race Conditions**: 0.3s delays after clipboard operations are critical. Removing them causes paste failures.
-
-5. **NotImplementedError Methods**: `check_new_msg()`, `get_dialogs()`, `save_dialog_pictures()`, and `get_dialogs_by_time_blocks()` are not adapted to WeChat 4.1 and will raise exceptions.
-
-## File Encoding Note
-
-`requirements.txt` is UTF-16 encoded (appears as spaced characters when read as UTF-8). Key dependencies are listed in the "Key Dependencies" section above. Install with:
-```bash
-pip install -r requirements.txt
-```
-
-## Code Style Observations
-
-- Chinese comments and variable names mixed with English
-- Minimal error handling (relies on try-except at high level)
-- GUI uses nested layouts (QVBoxLayout, QHBoxLayout) without Qt Designer
-- No unit tests present
-- Code is actively maintained (latest update: 2026/03/09)
+1. The target chat must be an independent WeChat chat window whose title matches the configured trigger sender.
+2. Narrator mode must be enabled or control detection will fail.
+3. WeChat UI depth and control names are version-sensitive; use `tools/automation.py` when upgrading WeChat.
+4. If the image folder is empty, image rules will log an error and skip sending.
+5. Some legacy methods in `ui_auto_wechat.py` remain `NotImplementedError` for WeChat 4.1 and are not used by the momo GUI.
